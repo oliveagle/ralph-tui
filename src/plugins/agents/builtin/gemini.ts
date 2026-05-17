@@ -234,6 +234,15 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
     return result.available;
   }
 
+  override getSandboxRequirements() {
+    return {
+      authPaths: ['~/.config/gcloud', '~/.config/gemini'],
+      binaryPaths: ['/usr/local/bin', '~/.local/bin'],
+      runtimePaths: [],
+      requiresNetwork: true,
+    };
+  }
+
   protected override getCommandNotFoundMessage(): string {
     return `Gemini CLI not found in PATH. Install from: https://github.com/google-gemini/gemini-cli` +
       ' Expected one of `gemini-cli`, `gemini` (legacy alias)';

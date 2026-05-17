@@ -218,6 +218,30 @@ describe('GeminiAgentPlugin', () => {
       expect(isReadyResult).toBe(detectResult.available);
     });
   });
+
+  describe('getSandboxRequirements', () => {
+    test('includes gcloud and gemini auth paths', () => {
+      const requirements = plugin.getSandboxRequirements();
+      expect(requirements.authPaths).toContain('~/.config/gcloud');
+      expect(requirements.authPaths).toContain('~/.config/gemini');
+    });
+
+    test('includes binary paths', () => {
+      const requirements = plugin.getSandboxRequirements();
+      expect(requirements.binaryPaths).toContain('/usr/local/bin');
+      expect(requirements.binaryPaths).toContain('~/.local/bin');
+    });
+
+    test('has empty runtime paths', () => {
+      const requirements = plugin.getSandboxRequirements();
+      expect(requirements.runtimePaths).toEqual([]);
+    });
+
+    test('requires network access', () => {
+      const requirements = plugin.getSandboxRequirements();
+      expect(requirements.requiresNetwork).toBe(true);
+    });
+  });
 });
 
 describe('GeminiAgentPlugin buildArgs', () => {
