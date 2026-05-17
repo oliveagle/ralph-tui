@@ -326,8 +326,9 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
     args.push('--output-format', 'stream-json');
 
     // Model selection
-    if (this.model) {
-      args.push('-m', this.model);
+    const modelStr = this.buildModelString();
+    if (modelStr) {
+      args.push('-m', modelStr);
     }
 
     // Auto-approve mode
@@ -489,27 +490,34 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
   }
 
   override async validateSetup(answers: Record<string, unknown>): Promise<string | null> {
+    // Flexible validation: accept any model string
     const model = answers.model;
     if (model !== undefined && model !== '' && typeof model === 'string') {
-      if (!model.startsWith('gemini-')) {
-        return 'Invalid model. Gemini models start with "gemini-"';
-      }
+      // Accept any non-empty string - let CLI handle errors
     }
     return null;
   }
 
   override validateModel(model: string): string | null {
+    // Flexible validation: accept any non-empty string
+    // Let the CLI handle invalid model names
     if (model === '' || model === undefined) {
-      return null;
+      return null; // Empty string is valid (uses default)
     }
-    if (!model.startsWith('gemini-')) {
-      return `Invalid model "${model}". Gemini models start with "gemini-"`;
-    }
+    // Accept any non-empty string - no validation
     return null;
   }
 
   override listModels(): string[] {
     return [...GEMINI_MODELS];
+  }
+
+  /**
+   * Build the model string for CLI arguments.
+   * Returns the configured model or undefined for default.
+   */
+  protected buildModelString(): string | undefined {
+    return this.model;
   }
 
   /**

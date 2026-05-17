@@ -131,10 +131,9 @@ describe('GeminiAgentPlugin', () => {
       expect(result).toBeNull();
     });
 
-    test('rejects invalid model format', async () => {
+    test('accepts any model format (flexible validation)', async () => {
       const result = await plugin.validateSetup({ model: 'gpt-4o' });
-      expect(result).not.toBeNull();
-      expect(result).toContain('gemini-');
+      expect(result).toBeNull(); // Flexible: let CLI handle errors
     });
   });
 
@@ -149,10 +148,9 @@ describe('GeminiAgentPlugin', () => {
       expect(plugin.validateModel('')).toBeNull();
     });
 
-    test('rejects non-gemini model', () => {
+    test('accepts any non-gemini model (flexible validation)', () => {
       const result = plugin.validateModel('gpt-4o');
-      expect(result).not.toBeNull();
-      expect(result).toContain('gemini-');
+      expect(result).toBeNull(); // Flexible: let CLI handle errors
     });
   });
 
