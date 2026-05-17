@@ -702,4 +702,171 @@ describe('ExecutionEngine', () => {
       expect(task).toBeNull();
     });
   });
+
+  describe('runLoop flow', () => {
+    test('refreshTasks before getNextAvailableTask: new task becomes available after refresh', async () => {
+      // Verifies that refreshTasks() updates the tracker state, then getNextAvailableTask()
+      // can pick up tasks that were added after the initial setup.
+      // This matches the runLoop pattern: await this.refreshTasks(); → getNextAvailableTask()
+      const tasks = [createMockTask({ id: 'task-1', status: 'open', title: 'Task 1' })];
+
+      const mockTracker: Partial<TrackerPlugin> = {
+        meta: {
+          id: 'mock',
+          name: 'Mock Tracker',
+          description: 'Mock tracker for testing',
+          version: '1.0.0',
+          supportsBidirectionalSync: false,
+          supportsHierarchy: false,
+          supportsDependencies: false,
+        },
+        getTasks: async () => tasks,
+        getNextTask: async (options?: { excludeIds?: string[] }) => {
+          const excluded = new Set(options?.excludeIds ?? []);
+          return tasks.find((t) => !excluded.has(t.id) && t.status === 'open') ?? undefined;
+        },
+        getTemplate: () => `Task: {{taskId}}`,
+        getPrdContext: async () => null,
+      };
+
+      const engine = new ExecutionEngine(createMockConfig());
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = mockTracker as TrackerPlugin;
+
+      const getNextTask = (engine as unknown as { getNextAvailableTask: () => Promise<TrackerTask | null> })
+        .getNextAvailableTask.bind(engine);
+
+      // Step 1: refreshTasks + getNextAvailableTask picks up initial task
+      await engine.refreshTasks();
+      const initialTask = await getNextTask();
+      expect(initialTask?.id).toBe('task-1');
+
+      // Step 2: simulate external task creation (task-2 added)
+      tasks.push(createMockTask({ id: 'task-2', status: 'open', title: 'Task 2' }));
+
+      // Step 3: complete task-1 (exclude it via completed task)
+      tasks[0] = createMockTask({ id: 'task-1', status: 'completed', title: 'Task 1' });
+
+      // Step 4: refreshTasks + getNextAvailableTask picks up task-2
+      await engine.refreshTasks();
+      const newTask = await getNextTask();
+      expect(newTask?.id).toBe('task-2');
+    });
+  });
+
+  describe('background task polling', () => {
+    test('timer starts when taskRefreshIntervalMs > 0', async () => {
+      const config = createMockConfig();
+      config.taskRefreshIntervalMs = 1000;
+
+      const engine = new ExecutionEngine(config);
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = createMockTracker([]);
+
+      // Verify timer starts
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      // Check that timer field is set
+      const timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).not.toBeNull();
+      expect(typeof timer).toBe('object');
+
+      // Clean up
+      (engine as unknown as { stopTaskRefreshTimer: () => void }).stopTaskRefreshTimer();
+    });
+
+    test('timer does not start when taskRefreshIntervalMs is 0', async () => {
+      const config = createMockConfig();
+      config.taskRefreshIntervalMs = 0;
+
+      const engine = new ExecutionEngine(config);
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = createMockTracker([]);
+
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      const timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).toBeNull();
+    });
+
+    test('timer does not start when taskRefreshIntervalMs is negative', async () => {
+      const config = createMockConfig();
+      config.taskRefreshIntervalMs = -100;
+
+      const engine = new ExecutionEngine(config);
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = createMockTracker([]);
+
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      const timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).toBeNull();
+    });
+
+    test('stopTaskRefreshTimer clears the timer', async () => {
+      const config = createMockConfig();
+      config.taskRefreshIntervalMs = 1000;
+
+      const engine = new ExecutionEngine(config);
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = createMockTracker([]);
+
+      // Start timer
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      // Verify timer exists
+      let timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).not.toBeNull();
+
+      // Stop timer
+      (engine as unknown as { stopTaskRefreshTimer: () => void }).stopTaskRefreshTimer();
+
+      // Verify timer is cleared
+      timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).toBeNull();
+    });
+
+    test('stop() cleans up the background refresh timer', async () => {
+      const config = createMockConfig();
+      config.taskRefreshIntervalMs = 1000;
+
+      const engine = new ExecutionEngine(config);
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = createMockTracker([]);
+
+      // Start timer
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      // Verify timer exists
+      let timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).not.toBeNull();
+
+      // Call stop() which should clean up the timer
+      await engine.stop();
+
+      // Verify timer is cleared
+      timer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(timer).toBeNull();
+    });
+
+    test('starting a new timer clears any existing timer', async () => {
+      const config = createMockConfig();
+      config.taskRefreshIntervalMs = 1000;
+
+      const engine = new ExecutionEngine(config);
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = createMockTracker([]);
+
+      // Start timer first time
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      const firstTimer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(firstTimer).not.toBeNull();
+
+      // Start timer again - should clear the first timer
+      (engine as unknown as { startTaskRefreshTimer: () => void }).startTaskRefreshTimer();
+
+      const secondTimer = (engine as unknown as { taskRefreshTimer: NodeJS.Timeout | null }).taskRefreshTimer;
+      expect(secondTimer).not.toBeNull();
+
+      // The second timer should be different from the first (meaning the first was cleared)
+      expect(secondTimer).not.toBe(firstTimer);
+
+      // Clean up
+      (engine as unknown as { stopTaskRefreshTimer: () => void }).stopTaskRefreshTimer();
+    });
+  });
 });
