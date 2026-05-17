@@ -2138,14 +2138,16 @@ export function RunApp({
       const tracker = engine.getTracker();
       if (!tracker) return;
       const tasks = await tracker.getTasks({ status: ['open', 'in_progress'] });
-      if (tasks.length > 0 && engine.getState().status !== 'running') {
-        // New tasks found, restart engine
-        setStatus('running');
-        engine.start().catch(() => {
-          setStatus('error');
-        });
-      } else if (tasks.length === 0) {
-        setStatus('idle');
+      if (tasks.length > 0) {
+        const engineStatus = engine.getState().status;
+        const isActive = ['running', 'executing', 'selecting'].includes(engineStatus);
+        if (!isActive) {
+          // New tasks found, restart engine
+          setStatus('running');
+          engine.start().catch(() => {
+            setStatus('error');
+          });
+        }
       }
     };
 

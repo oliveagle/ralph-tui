@@ -650,6 +650,13 @@ export class ExecutionEngine {
         ? this.state.tasksCompleted >= 1
         : await this.tracker!.isComplete();
       if (isComplete) {
+        // Refresh task list before emitting all:complete to show updated task statuses
+        try {
+          await this.refreshTasks();
+        } catch (error) {
+          console.warn('[tasks] Refresh failed before all:complete:', error);
+        }
+
         this.emit({
           type: 'all:complete',
           timestamp: new Date().toISOString(),
