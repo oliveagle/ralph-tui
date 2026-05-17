@@ -13,7 +13,7 @@ Gemini supports **subagent tracing** via stream-json output - Ralph TUI can show
 
 ## Prerequisites
 
-Install Gemini CLI:
+### Install Gemini CLI
 
 ```bash
 npm install -g @google/gemini-cli
@@ -24,6 +24,24 @@ Verify installation:
 ```bash
 gemini-cli --version
 ```
+
+### Authentication
+
+Gemini CLI requires authentication with Google Cloud. You are responsible for configuring authentication before using this plugin.
+
+**Google Cloud authentication** (recommended):
+```bash
+gcloud auth application-default login
+```
+
+**API key authentication**:
+```bash
+gemini-cli config set api-key YOUR_API_KEY
+```
+
+<Callout type="warning">
+Authentication is required for Gemini CLI to function. Ralph TUI does not manage Google Cloud credentials or API keys - you must configure them separately.
+</Callout>
 
 ## Basic Usage
 
@@ -165,22 +183,19 @@ gemini-cli \
   --output-format stream-json \    # Always used for structured output
   -m gemini-2.5-pro \              # If model specified
   --yolo \                         # When yoloMode enabled
+  --include-directories /path \    # For file context
   < prompt.txt                     # Prompt via stdin
 ```
 
-## Model Validation
+## Authentication
 
-Gemini agent validates that model names start with `gemini-`:
+Gemini CLI requires Google Cloud authentication or an API key. You are responsible for configuring this before using the plugin.
 
-```typescript
-// Valid models
-"gemini-2.5-pro"
-"gemini-2.5-flash"
+**Options:**
+- Google Cloud Application Default Credentials: `gcloud auth application-default login`
+- API key: `gemini-cli config set api-key YOUR_API_KEY`
 
-// Invalid - will show error
-"gpt-4"
-"claude-3"
-```
+See [Gemini CLI documentation](https://github.com/google/gemini-cli) for details.
 
 ## Troubleshooting
 
