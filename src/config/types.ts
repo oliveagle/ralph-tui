@@ -234,6 +234,12 @@ export interface RuntimeOptions {
 
   /** Enable parallel execution, optionally with worker count (--parallel [N]) */
   parallel?: number | boolean;
+
+  /** Skip tasks already marked as completed (closed/completed/cancelled) */
+  skipKnownCompleted?: boolean;
+
+  /** Auto-loop mode: continuously detect and process new tasks without ending */
+  autoLoop?: boolean;
 }
 
 /**
@@ -364,6 +370,14 @@ export interface StoredConfig {
 
   /** Conflict resolution configuration for parallel execution */
   conflictResolution?: ConflictResolutionConfig;
+
+  /**
+   * Skip tasks that are already in a completed state (closed/completed/cancelled).
+   * When enabled, the engine will skip tasks marked as completed without launching an agent.
+   * This saves time and tokens by avoiding redundant completion checks.
+   * Default: true
+   */
+  skipKnownCompleted?: boolean;
 }
 
 /**
@@ -443,6 +457,14 @@ export interface RalphConfig {
 
   /** Conflict resolution configuration for parallel execution */
   conflictResolution?: ConflictResolutionConfig;
+
+  /**
+   * Skip tasks that are already in a completed state (closed/completed/cancelled).
+   * When enabled, the engine will skip tasks marked as completed without launching an agent.
+   * This saves time and tokens by avoiding redundant completion checks.
+   * Default: true
+   */
+  skipKnownCompleted?: boolean;
 }
 
 /**

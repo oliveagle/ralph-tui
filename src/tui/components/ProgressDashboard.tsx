@@ -61,6 +61,8 @@ export interface ProgressDashboardProps {
     outputTokens: number;
     totalTokens: number;
   };
+  /** Last activity timestamp (ISO 8601) */
+  lastActiveTime?: string;
 }
 
 /**
@@ -148,6 +150,7 @@ export function ProgressDashboard({
   activeWorkerCount,
   totalWorkerCount,
   aggregateUsage,
+  lastActiveTime,
 }: ProgressDashboardProps): ReactNode {
   const statusDisplay = getStatusDisplay(status, currentTaskId);
   const sandboxDisplay = getSandboxDisplay(sandboxConfig, resolvedSandboxMode);
@@ -230,6 +233,14 @@ export function ProgressDashboard({
             <text fg={colors.status.info}>Workers: </text>
             <text fg={colors.status.success}>{activeWorkerCount} active</text>
             <text fg={colors.fg.muted}> / {totalWorkerCount}</text>
+          </box>
+        )}
+
+        {/* Last Active Time */}
+        {lastActiveTime && (
+          <box style={{ flexDirection: 'row' }}>
+            <text fg={colors.fg.muted}>Last Active: </text>
+            <text fg={colors.fg.secondary}>{lastActiveTime}</text>
           </box>
         )}
       </box>

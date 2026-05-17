@@ -668,6 +668,8 @@ export function RunApp({
   const trackerName = trackerType || storedConfig?.defaultTracker || storedConfig?.tracker || 'beads';
   // Dashboard visibility state (off by default for compact header design)
   const [showDashboard, setShowDashboard] = useState(false);
+  // Last activity timestamp
+  const [lastActiveTime, setLastActiveTime] = useState<string | null>(null);
   // Iteration history state
   const [iterations, setIterations] = useState<IterationResult[]>([]);
   const [totalIterations] = useState(10); // Default max iterations for display
@@ -1780,7 +1782,16 @@ export function RunApp({
   // Subscribe to engine events (engine is absent in parallel mode)
   useEffect(() => {
     if (!engine) return;
+
+    // Update last active time for any engine event
+    const updateLastActive = () => {
+      const now = new Date();
+      const hhmmss = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+      setLastActiveTime(hhmmss);
+    };
+
     const unsubscribe = engine.on((event: EngineEvent) => {
+      updateLastActive();
       switch (event.type) {
         case 'engine:started':
           // Engine starting means we're about to select a task
@@ -2105,6 +2116,54 @@ export function RunApp({
       setDetectedModel(state.currentModel);
     }
   }, [engine, agentName]);
+
+  // Auto-start engine when onStart is not provided (auto-loop mode)
+  useEffect(() => {
+    if (!engine || onStart !== undefined) return;
+    const started = engine.getState().status !== 'idle';
+    if (!started) {
+      setStatus('running');
+      engine.start().catch(() => {
+        setStatus('error');
+      });
+    }
+  }, [engine, onStart]);
+
+  // Auto-loop mode: restart engine when it completes (no tasks)
+  useEffect(() => {
+    if (!engine || onStart !== undefined) return;
+    let autoRestartTimer: NodeJS.Timeout | null = null;
+
+    const unsubscribe = engine.on((event) => {
+      if (event.type === 'engine:stopped') {
+        // Check if we should restart (auto-loop mode)
+        if (event.reason === 'completed' || event.reason === 'no_tasks') {
+          // Wait a bit and check for new tasks
+          if (autoRestartTimer) clearTimeout(autoRestartTimer);
+          autoRestartTimer = setTimeout(async () => {
+            const tracker = engine.getTracker();
+            if (tracker) {
+              const tasks = await tracker.getTasks({ status: ['open', 'in_progress'] });
+              if (tasks.length > 0) {
+                // New tasks found, restart engine
+                setStatus('running');
+                engine.start().catch(() => {
+                  setStatus('error');
+                });
+              } else {
+                // No new tasks, show idle state but keep watching
+                setStatus('idle');
+              }
+            }
+          }, 5000);
+        }
+      }
+    });
+    return () => {
+      unsubscribe?.();
+      if (autoRestartTimer) clearTimeout(autoRestartTimer);
+    };
+  }, [engine, onStart]);
 
   useEffect(() => {
     currentTaskIdRef.current = currentTaskId;
@@ -3681,6 +3740,7 @@ export function RunApp({
           activeWorkerCount={activeWorkerCount}
           totalWorkerCount={totalWorkerCount}
           aggregateUsage={displayAggregateUsage}
+          lastActiveTime={lastActiveTime || undefined}
         />
       )}
 

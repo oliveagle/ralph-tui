@@ -894,6 +894,10 @@ interface ExtendedRuntimeOptions extends RuntimeOptions {
   targetBranch?: string;
   /** Filter tasks by index range (e.g., 1-5, 3-, -10) */
   taskRange?: TaskRangeFilter;
+  /** Skip tasks already marked as completed (closed/completed/cancelled) */
+  skipKnownCompleted?: boolean;
+  /** Auto-loop mode: continuously detect and process tasks, never ending */
+  autoLoop?: boolean;
   /** Skip local engine; TUI acts as pure client to configured remotes */
   remoteOnly?: boolean;
 }
@@ -1180,6 +1184,18 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
           i++;
         }
         break;
+
+      case '--skip-known-completed':
+        options.skipKnownCompleted = true;
+        break;
+
+      case '--no-skip-known-completed':
+        options.skipKnownCompleted = false;
+        break;
+
+      case '--auto-loop':
+        options.autoLoop = true;
+        break;
     }
   }
 
@@ -1229,6 +1245,8 @@ Options:
   --direct-merge      Merge directly to current branch (skip session branch creation)
   --target-branch <name> Create/use explicit session branch name for parallel mode
   --task-range <range> Filter tasks by index (e.g., 1-5, 3-, -10)
+  --no-skip-known-completed Disable skipping of closed/completed tasks (default: skip enabled)
+  --auto-loop             Continuously detect and process tasks, never ending (daemon mode)
   --listen            Enable remote listener (implies --headless)
   --listen-port <n>   Port for remote listener (default: 7890)
   --rotate-token      Rotate server token before starting listener
@@ -2128,7 +2146,8 @@ async function runWithTui(
   initialTasks: TrackerTask[],
   storedConfig?: StoredConfig,
   notificationOptions?: NotificationRunOptions,
-  executionScopes: ExecutionScope[] = []
+  executionScopes: ExecutionScope[] = [],
+  autoLoop?: boolean
 ): Promise<PersistedSessionState> {
   let currentState = persistedState;
   // Track when engine starts for duration calculation
@@ -2360,6 +2379,7 @@ async function runWithTui(
 
   // Render the TUI with wrapper that manages dialog state
   // Pass initialTasks for display in "ready" state and onStart callback
+  // In auto-loop mode, pass undefined for onStart to auto-start immediately
   root.render(
     <RunAppWrapper
       engine={engine}
@@ -2367,7 +2387,7 @@ async function runWithTui(
       onQuit={gracefulShutdown}
       onInterruptConfirmed={gracefulShutdown}
       initialTasks={initialTasks}
-      onStart={handleStart}
+      onStart={autoLoop ? undefined : handleStart}
       storedConfig={storedConfig}
       cwd={config.cwd}
       trackerType={config.tracker.plugin}
@@ -3161,6 +3181,8 @@ interface HeadlessOptions {
   notificationOptions?: NotificationRunOptions;
   /** If true, keep process alive after engine completes (for remote listener) */
   listenMode?: boolean;
+  /** If true, continuously detect and process tasks, never ending */
+  autoLoop?: boolean;
   /** Remote server instance to stop on shutdown */
   remoteServer?: RemoteServer | null;
 }
@@ -3173,6 +3195,7 @@ async function runHeadless(
 ): Promise<PersistedSessionState> {
   const notificationOptions = headlessOptions?.notificationOptions;
   const listenMode = headlessOptions?.listenMode ?? false;
+  const autoLoop = headlessOptions?.autoLoop ?? false;
   const remoteServer = headlessOptions?.remoteServer;
   let currentState = persistedState;
   let lastSigintTime = 0;
@@ -3426,8 +3449,67 @@ async function runHeadless(
     config.tracker.plugin
   );
 
-  // Start the engine
-  await engine.start();
+  // Auto-loop mode: continuously start engine, wait for completion, restart
+  if (autoLoop) {
+    logger.info('system', 'Auto-loop mode enabled. Continuously detecting and processing tasks...');
+    logger.info('system', 'Press Ctrl+C to stop.');
+  }
+
+  // Main loop: restart engine when it completes (for auto-loop mode)
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    // Start the engine
+    await engine.start();
+
+    if (autoLoop) {
+      logger.info('system', 'Engine completed. Checking for new tasks...');
+      // Wait 5 seconds before checking for new tasks
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      // Check if there are new tasks available
+      const tracker = engine.getTracker();
+      if (tracker) {
+        const tasks = await tracker.getTasks({ status: ['open', 'in_progress'] });
+        if (tasks.length > 0) {
+          logger.info('system', `Found ${tasks.length} new task(s). Restarting engine...`);
+          continue; // Restart the engine for new tasks
+        }
+      }
+
+      // No new tasks, keep waiting
+      logger.info('system', 'No new tasks found. Waiting for tasks (Ctrl+C to stop)...');
+      // Keep checking every 10 seconds
+      await new Promise<void>((resolve) => {
+        const checkInterval = setInterval(async () => {
+          const trackerCheck = engine.getTracker();
+          if (trackerCheck) {
+            const tasksCheck = await trackerCheck.getTasks({ status: ['open', 'in_progress'] });
+            if (tasksCheck.length > 0) {
+              clearInterval(checkInterval);
+              logger.info('system', `Found ${tasksCheck.length} new task(s). Restarting engine...`);
+              resolve();
+            }
+          }
+        }, 10000);
+
+        // Store interval for cleanup on shutdown
+        // @ts-expect-error - storing for cleanup
+        globalThis._autoLoopInterval = checkInterval;
+      });
+
+      // Clean up interval
+      // @ts-expect-error - cleanup
+      if (globalThis._autoLoopInterval) {
+        // @ts-expect-error - cleanup
+        clearInterval(globalThis._autoLoopInterval);
+        // @ts-expect-error - cleanup
+        globalThis._autoLoopInterval = undefined;
+      }
+    } else {
+      // Non-auto-loop mode: exit after engine completes
+      break;
+    }
+  }
 
   // In listen mode, keep process alive for remote connections
   if (listenMode) {
@@ -3716,7 +3798,8 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   const hasPersistedSessionFile = await hasPersistedSession(config.cwd);
 
   // Handle existing persisted session prompt first (before lock acquisition)
-  if (hasPersistedSessionFile && !options.force && !options.resume) {
+  // In auto-loop mode, always start fresh without prompting
+  if (hasPersistedSessionFile && !options.force && !options.resume && !options.autoLoop) {
     const choice = await promptResumeOrNew(config.cwd);
     if (choice === 'abort') {
       process.exit(1);
@@ -3727,14 +3810,20 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     }
   }
 
+  // In auto-loop mode, delete old session and start fresh
+  if (options.autoLoop && hasPersistedSessionFile) {
+    await deletePersistedSession(config.cwd);
+  }
+
   // Generate session ID early for lock acquisition
   const { randomUUID } = await import('node:crypto');
   const newSessionId = randomUUID();
 
   // Acquire lock with proper error messages and stale lock handling
+  // In auto-loop mode, treat as non-interactive and force stale lock cleanup
   const lockResult = await acquireLockWithPrompt(config.cwd, newSessionId, {
-    force: options.force,
-    nonInteractive: options.headless,
+    force: options.force || options.autoLoop,
+    nonInteractive: options.headless || options.autoLoop,
   });
 
   if (!lockResult.acquired) {
@@ -4417,13 +4506,15 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         tasks,
         storedConfig,
         notificationRunOptions,
-        executionScopes
+        executionScopes,
+        options.autoLoop
       );
     } else {
       // Sequential headless mode (existing path)
       persistedState = await runHeadless(engine, persistedState, config, {
         notificationOptions: notificationRunOptions,
         listenMode: options.listen,
+        autoLoop: options.autoLoop,
         remoteServer,
       });
     }

@@ -156,6 +156,7 @@ export class StructuredLogger {
   /**
    * Log agent stdout output with [AGENT] prefix.
    * Agent output is streamed line-by-line with the AGENT component.
+   * Each line is prefixed with HHMMSS timestamp for easy correlation.
    */
   agentOutput(data: string): void {
     // Split into lines and log each one
@@ -163,19 +164,24 @@ export class StructuredLogger {
     for (const line of lines) {
       // Skip empty lines to reduce noise
       if (line.trim()) {
-        this.info('agent', line);
+        // Add HHMMSS timestamp prefix to each agent output line
+        const timestamp = formatTimestamp(new Date(), false).replace(/:/g, '');
+        this.info('agent', `${timestamp} ${line}`);
       }
     }
   }
 
   /**
    * Log agent stderr output with [AGENT] prefix.
+   * Each line is prefixed with HHMMSS timestamp for easy correlation.
    */
   agentError(data: string): void {
     const lines = data.split('\n');
     for (const line of lines) {
       if (line.trim()) {
-        this.warn('agent', line);
+        // Add HHMMSS timestamp prefix to each agent error line
+        const timestamp = formatTimestamp(new Date(), false).replace(/:/g, '');
+        this.warn('agent', `${timestamp} ${line}`);
       }
     }
   }
