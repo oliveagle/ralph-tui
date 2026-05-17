@@ -152,6 +152,7 @@ export const StoredConfigSchema = z
     // Core settings
     maxIterations: z.number().int().min(0).max(1000).optional(),
     iterationDelay: z.number().int().min(0).max(300000).optional(),
+    taskRefreshIntervalMs: z.number().int().min(-1).optional(),
     outputDir: z.string().optional(),
     autoCommit: z.boolean().optional(),
     commitMessageTemplate: z.string().optional(),
