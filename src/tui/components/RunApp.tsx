@@ -2129,39 +2129,42 @@ export function RunApp({
     }
   }, [engine, onStart]);
 
-  // Auto-loop mode: restart engine when it completes (no tasks)
+  // Auto-loop mode: continuously poll for new tasks when engine is idle
   useEffect(() => {
     if (!engine || onStart !== undefined) return;
-    let autoRestartTimer: NodeJS.Timeout | null = null;
+    let pollInterval: NodeJS.Timeout | null = null;
+
+    const startPolling = async () => {
+      const tracker = engine.getTracker();
+      if (!tracker) return;
+      const tasks = await tracker.getTasks({ status: ['open', 'in_progress'] });
+      if (tasks.length > 0 && engine.getState().status !== 'running') {
+        // New tasks found, restart engine
+        setStatus('running');
+        engine.start().catch(() => {
+          setStatus('error');
+        });
+      } else if (tasks.length === 0) {
+        setStatus('idle');
+      }
+    };
 
     const unsubscribe = engine.on((event) => {
       if (event.type === 'engine:stopped') {
-        // Check if we should restart (auto-loop mode)
         if (event.reason === 'completed' || event.reason === 'no_tasks') {
-          // Wait a bit and check for new tasks
-          if (autoRestartTimer) clearTimeout(autoRestartTimer);
-          autoRestartTimer = setTimeout(async () => {
-            const tracker = engine.getTracker();
-            if (tracker) {
-              const tasks = await tracker.getTasks({ status: ['open', 'in_progress'] });
-              if (tasks.length > 0) {
-                // New tasks found, restart engine
-                setStatus('running');
-                engine.start().catch(() => {
-                  setStatus('error');
-                });
-              } else {
-                // No new tasks, show idle state but keep watching
-                setStatus('idle');
-              }
-            }
-          }, 5000);
+          // Start continuous polling
+          if (pollInterval) clearInterval(pollInterval);
+          // Check immediately
+          startPolling();
+          // Then check every 5 seconds
+          pollInterval = setInterval(startPolling, 5000);
         }
       }
     });
+
     return () => {
       unsubscribe?.();
-      if (autoRestartTimer) clearTimeout(autoRestartTimer);
+      if (pollInterval) clearInterval(pollInterval);
     };
   }, [engine, onStart]);
 

@@ -1029,6 +1029,37 @@ export class ExecutionEngine {
       iteration,
     });
 
+    // Skip tasks already marked as completed (closed/completed/cancelled)
+    // This saves time and tokens by avoiding redundant agent execution
+    if (this.config.skipKnownCompleted !== false) {
+      const freshTask = await this.tracker!.getTask(task.id);
+      if (freshTask && (freshTask.status === 'completed' || freshTask.status === 'cancelled')) {
+        const startedAtStr = startedAt.toISOString();
+        const finishedAt = new Date();
+        const finishedAtStr = finishedAt.toISOString();
+
+        const result: IterationResult = {
+          iteration,
+          status: 'skipped',
+          task: freshTask,
+          taskCompleted: true,
+          promiseComplete: true,
+          durationMs: 0,
+          startedAt: startedAtStr,
+          endedAt: finishedAtStr,
+        };
+
+        this.emit({
+          type: 'iteration:completed',
+          timestamp: finishedAtStr,
+          result,
+        });
+
+        this.state.tasksCompleted++;
+        return result;
+      }
+    }
+
     // Update task status to in_progress
     await this.tracker!.updateTaskStatus(task.id, 'in_progress');
 

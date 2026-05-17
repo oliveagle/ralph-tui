@@ -720,6 +720,8 @@ export async function buildConfig(
     promptTemplate: options.promptPath ?? storedConfig.prompt_template,
     autoCommit: storedConfig.autoCommit ?? false,
     commitMessageTemplate: storedConfig.commitMessageTemplate,
+    // Default to true for skipKnownCompleted (can be disabled with --no-skip-known-completed)
+    skipKnownCompleted: options.skipKnownCompleted ?? storedConfig.skipKnownCompleted ?? true,
   };
 }
 

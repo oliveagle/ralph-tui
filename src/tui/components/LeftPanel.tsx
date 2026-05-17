@@ -184,8 +184,63 @@ export const LeftPanel = memo(function LeftPanel({
   // Calculate max width for task row content (panel width minus padding and border)
   const maxRowWidth = Math.max(20, width - 4);
 
+  // Filter and sort tasks when count exceeds 100
+  // - Active tasks are always shown first
+  // - Completed tasks sorted by time (newest first)
+  // - Only the excess beyond 100 is trimmed
+  let filteredTasks = tasks;
+  if (tasks.length > 100) {
+    // Identify parent tasks (those with children in the list)
+    const parentIds = new Set(
+      tasks.filter((t) => tasks.some((c) => c.parentId === t.id)).map((t) => t.id)
+    );
+
+    // Sort: active tasks first, then completed by iteration (newest first)
+    const sortedTasks = [...tasks].sort((a, b) => {
+      const aIsActive = ['active', 'actionable', 'pending', 'blocked'].includes(a.status);
+      const bIsActive = ['active', 'actionable', 'pending', 'blocked'].includes(b.status);
+      if (aIsActive && !bIsActive) return -1;
+      if (!aIsActive && bIsActive) return 1;
+      // Within same category, newest first (higher iteration = newer)
+      return (b.iteration ?? 0) - (a.iteration ?? 0);
+    });
+
+    // Take first 100 tasks (already sorted), but always keep parent tasks
+
+    // Active tasks are always kept
+    const activeTasks = sortedTasks.filter(
+      (t) => ['active', 'actionable', 'pending', 'blocked'].includes(t.status)
+    );
+
+    // Completed tasks: keep up to (100 - activeCount), but always keep parents
+    const completedTasks = sortedTasks.filter(
+      (t) => !['active', 'actionable', 'pending', 'blocked'].includes(t.status)
+    );
+
+    const remainingSlots = Math.max(0, 100 - activeTasks.length);
+    const keptCompleted: TaskItem[] = [];
+    for (const t of completedTasks) {
+      if (parentIds.has(t.id) || keptCompleted.length < remainingSlots) {
+        keptCompleted.push(t);
+      }
+    }
+
+    filteredTasks = [...activeTasks, ...keptCompleted];
+  }
+
   // Build indentation map for hierarchical display
-  const indentMap = buildIndentMap(tasks);
+  const indentMap = buildIndentMap(filteredTasks);
+
+  // Adjust selectedIndex to work with filtered tasks
+  // Find the index of the selected task in the filtered array
+  let adjustedSelectedIndex = selectedIndex;
+  if (tasks.length > 0 && filteredTasks.length > 0) {
+    const selectedTask = tasks[selectedIndex];
+    adjustedSelectedIndex = filteredTasks.findIndex((t) => t.id === selectedTask?.id);
+    if (adjustedSelectedIndex === -1) {
+      adjustedSelectedIndex = 0;
+    }
+  }
 
   return (
     <box
@@ -207,7 +262,7 @@ export const LeftPanel = memo(function LeftPanel({
           width: '100%',
         }}
       >
-        {tasks.length === 0 ? (
+        {filteredTasks.length === 0 ? (
           <box style={{ padding: 1, flexDirection: 'column' }}>
             {isViewingRemote && remoteConnectionStatus !== 'connected' ? (
               <>
@@ -227,11 +282,11 @@ export const LeftPanel = memo(function LeftPanel({
             )}
           </box>
         ) : (
-          tasks.map((task, index) => (
+          filteredTasks.map((task, index) => (
             <TaskRow
               key={task.id}
               task={task}
-              isSelected={index === selectedIndex}
+              isSelected={index === adjustedSelectedIndex}
               maxWidth={maxRowWidth}
               indentLevel={indentMap.get(task.id) ?? 0}
               showScopePrefix={showScopePrefixes}
