@@ -24,6 +24,58 @@ export { extractErrorMessage } from '../utils.js';
 const GEMINI_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash'] as const;
 
 /**
+ * Represents a parsed JSONL message from Gemini CLI output.
+ * Gemini CLI emits various event types as JSON objects, one per line.
+ */
+export interface GeminiJsonlMessage {
+  /** The type of event (e.g., 'init', 'message', 'tool_use', 'tool_result', 'error', 'result') */
+  type: string;
+  /** Message content for text messages */
+  content?: string;
+  /** Tool name if applicable */
+  toolName?: string;
+  /** Tool input arguments if applicable */
+  toolInput?: Record<string, unknown>;
+  /** Token usage - input tokens */
+  tokensIn?: number;
+  /** Token usage - output tokens */
+  tokensOut?: number;
+  /** Token usage - total tokens */
+  tokensTotal?: number;
+  /** Cost information if available */
+  cost?: number;
+  /** Error message for error events */
+  error?: string;
+  /** Timestamp of the event */
+  timestamp?: number;
+  /** Raw JSON object for unknown fields */
+  raw?: Record<string, unknown>;
+}
+
+/**
+ * Result of parsing a single JSONL line.
+ */
+type JsonlParseResult =
+  | { success: true; message: GeminiJsonlMessage }
+  | { success: false; raw: string; error?: string };
+
+/**
+ * State of the Gemini streaming JSONL parser.
+ */
+export interface GeminiParserState {
+  /** Accumulated parsed messages */
+  messages: GeminiJsonlMessage[];
+  /** Lines that failed to parse (non-empty) */
+  fallback: string[];
+  /** Total input tokens accumulated */
+  totalTokensIn: number;
+  /** Total output tokens accumulated */
+  totalTokensOut: number;
+  /** Total cost accumulated */
+  totalCost: number;
+}
+
+/**
  * Parse Gemini JSON line into standardized display events.
  * Returns AgentDisplayEvent[] - the shared processAgentEvents decides what to show.
  *
@@ -109,7 +161,7 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
     commandAliases: ['gemini'],
     supportsStreaming: true,
     supportsInterrupt: true,
-    supportsFileContext: false,
+    supportsFileContext: true,
     supportsSubagentTracing: true,
     structuredOutputFormat: 'jsonl',
     skillsPaths: {
@@ -260,7 +312,7 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
 
   protected buildArgs(
     _prompt: string,
-    _files?: AgentFileContext[],
+    files?: AgentFileContext[],
     _options?: AgentExecuteOptions
   ): string[] {
     const args: string[] = [];
@@ -281,6 +333,26 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
     // Auto-approve mode
     if (this.yoloMode) {
       args.push('--yolo');
+    }
+
+    // Add file context if provided
+    // Gemini CLI supports --include-directories for directory context
+    if (files && files.length > 0) {
+      const directories = new Set<string>();
+
+      for (const file of files) {
+        // Extract directory from file path for --include-directories
+        const lastSlash = file.path.lastIndexOf('/');
+        if (lastSlash > 0) {
+          directories.add(file.path.substring(0, lastSlash));
+        }
+        // Handle files without directory path (no slash) - skip gracefully
+      }
+
+      // Add unique directories
+      for (const dir of directories) {
+        args.push('--include-directories', dir);
+      }
     }
 
     return args;
@@ -438,6 +510,203 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
 
   override listModels(): string[] {
     return [...GEMINI_MODELS];
+  }
+
+  /**
+   * Parse a single JSONL line from Gemini CLI output.
+   *
+   * @param line Single line of JSONL output
+   * @returns Parse result with message on success, or raw line on failure
+   */
+  static parseJsonlLine(line: string): JsonlParseResult {
+    if (!line.trim()) {
+      return { success: false, raw: line };
+    }
+
+    try {
+      const json = JSON.parse(line);
+
+      const msg: GeminiJsonlMessage = {
+        type: json.type ?? json.event ?? 'unknown',
+        raw: json,
+      };
+
+      // Extract content
+      if (typeof json.content === 'string') {
+        msg.content = json.content;
+      } else if (typeof json.message === 'string') {
+        msg.content = json.message;
+      } else if (typeof json.text === 'string') {
+        msg.content = json.text;
+      } else if (json.output?.text) {
+        msg.content = json.output.text;
+      } else if (json.message?.content?.text) {
+        msg.content = json.message.content.text;
+      }
+
+      // Extract tool information
+      if (json.tool?.name || json.tool_use?.name) {
+        msg.toolName = json.tool?.name ?? json.tool_use?.name;
+      } else if (typeof json.tool_name === 'string') {
+        msg.toolName = json.tool_name;
+      } else if (json.tool?.function?.name) {
+        msg.toolName = json.tool.function.name;
+      }
+
+      if (json.tool?.input || json.tool_use?.input) {
+        msg.toolInput = json.tool?.input ?? json.tool_use?.input;
+      }
+
+      // Extract token usage
+      if (json.usage?.input_tokens != null) {
+        msg.tokensIn = json.usage.input_tokens;
+      }
+      if (json.usage?.output_tokens != null) {
+        msg.tokensOut = json.usage.output_tokens;
+      }
+      if (json.usage?.total_tokens != null) {
+        msg.tokensTotal = json.usage.total_tokens;
+      } else if (json.tokens != null) {
+        msg.tokensTotal = json.tokens;
+      }
+
+      // Extract cost
+      if (json.cost != null) {
+        msg.cost = json.cost;
+      } else if (json.usage?.cost != null) {
+        msg.cost = json.usage.cost;
+      }
+
+      // Extract error
+      if (json.error) {
+        msg.error = typeof json.error === 'string' ? json.error : JSON.stringify(json.error);
+      }
+
+      // Extract timestamp
+      if (json.timestamp != null) {
+        msg.timestamp = json.timestamp;
+      } else if (json.time != null) {
+        msg.timestamp = json.time;
+      }
+
+      return { success: true, message: msg };
+    } catch (e) {
+      return { success: false, raw: line, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * Parse a complete JSONL output string from Gemini CLI.
+   * Handles multi-line output, parsing each line independently.
+   * Lines that fail to parse are returned as raw text in the fallback array.
+   *
+   * @param output Complete output string (may contain multiple lines)
+   * @returns Object with parsed messages and any raw fallback lines
+   */
+  static parseJsonlOutput(output: string): {
+    messages: GeminiJsonlMessage[];
+    fallback: string[];
+  } {
+    const messages: GeminiJsonlMessage[] = [];
+    const fallback: string[] = [];
+
+    const lines = output.split('\n');
+
+    for (const line of lines) {
+      const result = GeminiAgentPlugin.parseJsonlLine(line);
+      if (result.success) {
+        messages.push(result.message);
+      } else if (result.raw.trim()) {
+        fallback.push(result.raw);
+      }
+    }
+
+    return { messages, fallback };
+  }
+
+  /**
+   * Create a streaming JSONL parser that accumulates partial lines.
+   * Use this for processing streaming output where data chunks may
+   * split across line boundaries.
+   *
+   * @returns Parser object with push() method and getState() to retrieve results
+   */
+  static createStreamingJsonlParser(): {
+    push: (chunk: string) => JsonlParseResult[];
+    flush: () => JsonlParseResult[];
+    getState: () => GeminiParserState;
+  } {
+    let buffer = '';
+    const messages: GeminiJsonlMessage[] = [];
+    const fallback: string[] = [];
+    let totalTokensIn = 0;
+    let totalTokensOut = 0;
+    let totalCost = 0;
+
+    const accumulate = (msg: GeminiJsonlMessage) => {
+      if (msg.tokensIn != null) totalTokensIn += msg.tokensIn;
+      if (msg.tokensOut != null) totalTokensOut += msg.tokensOut;
+      if (msg.cost != null) totalCost += msg.cost;
+    };
+
+    return {
+      /**
+       * Push a chunk of data to the parser.
+       * Returns any complete lines that were parsed.
+       */
+      push(chunk: string): JsonlParseResult[] {
+        buffer += chunk;
+        const results: JsonlParseResult[] = [];
+
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+
+          const result = GeminiAgentPlugin.parseJsonlLine(line);
+          results.push(result);
+
+          if (result.success) {
+            messages.push(result.message);
+            accumulate(result.message);
+          } else if (result.raw.trim()) {
+            fallback.push(result.raw);
+          }
+        }
+
+        return results;
+      },
+
+      /**
+       * Flush any remaining buffered content.
+       * Call this when the stream ends to process any trailing content.
+       */
+      flush(): JsonlParseResult[] {
+        if (!buffer.trim()) {
+          buffer = '';
+          return [];
+        }
+
+        const result = GeminiAgentPlugin.parseJsonlLine(buffer);
+        buffer = '';
+
+        if (result.success) {
+          messages.push(result.message);
+          accumulate(result.message);
+        } else if (result.raw.trim()) {
+          fallback.push(result.raw);
+        }
+
+        return [result];
+      },
+
+      /**
+       * Get the current accumulated state including usage totals.
+       */
+      getState(): GeminiParserState {
+        return { messages, fallback, totalTokensIn, totalTokensOut, totalCost };
+      },
+    };
   }
 }
 

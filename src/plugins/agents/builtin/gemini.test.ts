@@ -51,6 +51,10 @@ describe('GeminiAgentPlugin', () => {
       expect(plugin.meta.supportsSubagentTracing).toBe(true);
     });
 
+    test('supports file context', () => {
+      expect(plugin.meta.supportsFileContext).toBe(true);
+    });
+
     test('has JSONL structured output format', () => {
       expect(plugin.meta.structuredOutputFormat).toBe('jsonl');
     });
@@ -163,12 +167,12 @@ describe('GeminiAgentPlugin', () => {
 });
 
 describe('GeminiAgentPlugin buildArgs', () => {
-  let plugin: GeminiAgentPlugin;
+  let plugin: TestableGeminiPlugin;
 
   // Create a test subclass to access protected method
   class TestableGeminiPlugin extends GeminiAgentPlugin {
-    testBuildArgs(prompt: string): string[] {
-      return (this as unknown as { buildArgs: (p: string) => string[] }).buildArgs(prompt);
+    testBuildArgs(prompt: string, files?: { path: string }[]): string[] {
+      return (this as unknown as { buildArgs: (p: string, f?: { path: string }[]) => string[] }).buildArgs(prompt, files);
     }
 
     testGetStdinInput(prompt: string): string | undefined {
@@ -186,40 +190,102 @@ describe('GeminiAgentPlugin buildArgs', () => {
 
   test('includes --output-format stream-json', async () => {
     await plugin.initialize({});
-    const args = (plugin as TestableGeminiPlugin).testBuildArgs('test prompt');
+    const args = plugin.testBuildArgs('test prompt');
     expect(args).toContain('--output-format');
     expect(args).toContain('stream-json');
   });
 
   test('includes --yolo by default', async () => {
     await plugin.initialize({});
-    const args = (plugin as TestableGeminiPlugin).testBuildArgs('test prompt');
+    const args = plugin.testBuildArgs('test prompt');
     expect(args).toContain('--yolo');
   });
 
   test('omits --yolo when disabled', async () => {
     await plugin.initialize({ yoloMode: false });
-    const args = (plugin as TestableGeminiPlugin).testBuildArgs('test prompt');
+    const args = plugin.testBuildArgs('test prompt');
     expect(args).not.toContain('--yolo');
   });
 
   test('includes model flag when specified', async () => {
     await plugin.initialize({ model: 'gemini-2.5-flash' });
-    const args = (plugin as TestableGeminiPlugin).testBuildArgs('test prompt');
+    const args = plugin.testBuildArgs('test prompt');
     expect(args).toContain('-m');
     expect(args).toContain('gemini-2.5-flash');
   });
 
   test('omits model flag when not specified', async () => {
     await plugin.initialize({});
-    const args = (plugin as TestableGeminiPlugin).testBuildArgs('test prompt');
+    const args = plugin.testBuildArgs('test prompt');
     expect(args).not.toContain('-m');
   });
 
   test('returns prompt via stdin', async () => {
     await plugin.initialize({});
-    const stdinInput = (plugin as TestableGeminiPlugin).testGetStdinInput('my test prompt');
+    const stdinInput = plugin.testGetStdinInput('my test prompt');
     expect(stdinInput).toBe('my test prompt');
+  });
+
+  describe('file context support', () => {
+    test('extracts unique directories from file paths', async () => {
+      await plugin.initialize({});
+      const files = [
+        { path: 'src/components/Button.tsx' },
+        { path: 'src/components/Header.tsx' },
+        { path: 'src/utils/helpers.ts' },
+      ];
+      const args = plugin.testBuildArgs('test prompt', files);
+      expect(args).toContain('--include-directories');
+      expect(args).toContain('src/components');
+      expect(args).toContain('src/utils');
+    });
+
+    test('deduplicates directories', async () => {
+      await plugin.initialize({});
+      const files = [
+        { path: 'src/components/Button.tsx' },
+        { path: 'src/components/Header.tsx' },
+        { path: 'src/components/Footer.tsx' },
+      ];
+      const args = plugin.testBuildArgs('test prompt', files);
+      const includeDirs = args.filter((a) => a === '--include-directories').length;
+      expect(includeDirs).toBe(1);
+      expect(args).toContain('src/components');
+    });
+
+    test('handles empty file list gracefully', async () => {
+      await plugin.initialize({});
+      const args = plugin.testBuildArgs('test prompt', []);
+      expect(args).not.toContain('--include-directories');
+    });
+
+    test('handles files without directory paths gracefully', async () => {
+      await plugin.initialize({});
+      const files = [
+        { path: 'README.md' },
+        { path: 'package.json' },
+      ];
+      const args = plugin.testBuildArgs('test prompt', files);
+      expect(args).not.toContain('--include-directories');
+    });
+
+    test('handles mixed files with and without directories', async () => {
+      await plugin.initialize({});
+      const files = [
+        { path: 'src/index.ts' },
+        { path: 'README.md' },
+        { path: 'package.json' },
+        { path: 'src/utils/helpers.ts' },
+      ];
+      const args = plugin.testBuildArgs('test prompt', files);
+      expect(args).toContain('--include-directories');
+      expect(args).toContain('src');
+      expect(args).toContain('src/utils');
+    });
+
+    test('supportsFileContext is enabled', () => {
+      expect(plugin.meta.supportsFileContext).toBe(true);
+    });
   });
 });
 
