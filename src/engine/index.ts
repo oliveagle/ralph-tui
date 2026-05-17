@@ -623,6 +623,10 @@ export class ExecutionEngine {
         break;
       }
 
+      // Refresh task list before selecting next task to pick up any new
+      // tasks created externally or by agents during previous iterations.
+      await this.refreshTasks();
+
       // Get next task (excluding skipped tasks)
       const task = await this.getNextAvailableTask();
       if (!task) {
