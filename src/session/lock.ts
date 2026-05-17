@@ -298,6 +298,13 @@ export async function acquireLockWithPrompt(
 
   // Lock exists but process is not running (stale lock)
   if (lockStatus.isStale) {
+    // Force flag takes precedence - delete and acquire without prompting
+    if (force) {
+      console.log(`Warning: Forcing lock acquisition (previous PID: ${lockStatus.lock.pid})`);
+      await deleteLockFile(cwd);
+      return tryWriteLockFile(cwd, sessionId);
+    }
+
     if (nonInteractive) {
       // In non-interactive mode, warn and auto-clean
       console.log(`Warning: Removing stale lock (PID: ${lockStatus.lock.pid})`);
@@ -315,13 +322,6 @@ export async function acquireLockWithPrompt(
       };
     }
 
-    await deleteLockFile(cwd);
-    return tryWriteLockFile(cwd, sessionId);
-  }
-
-  // Force flag set - override the lock
-  if (force) {
-    console.log(`Warning: Forcing lock acquisition (previous PID: ${lockStatus.lock.pid})`);
     await deleteLockFile(cwd);
     return tryWriteLockFile(cwd, sessionId);
   }

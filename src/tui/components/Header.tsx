@@ -68,9 +68,9 @@ function MiniProgressBar({
   total: number;
   width: number;
 }): ReactNode {
-  const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+  const percentage = total > 0 ? Math.min(Math.round((completed / total) * 100), 100) : 0;
   const filledWidth = Math.floor((percentage / 100) * width);
-  const emptyWidth = width - filledWidth;
+  const emptyWidth = Math.max(width - filledWidth, 0);
 
   const filledBar = '▓'.repeat(filledWidth);
   const emptyBar = '░'.repeat(emptyWidth);

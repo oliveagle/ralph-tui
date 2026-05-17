@@ -1614,9 +1614,7 @@ async function promptResumeOrNew(cwd: string): Promise<'resume' | 'new' | 'abort
     console.log('  To resume:  ralph-tui resume');
     console.log('  To start fresh: ralph-tui run --force');
     console.log('');
-    console.log('Starting fresh session...');
-    console.log('(Use --resume flag or "ralph-tui resume" command to continue)');
-    return 'new';
+    return 'abort';
   } else {
     console.log('This session has completed and cannot be resumed.');
     console.log('Starting fresh session...');
@@ -3023,17 +3021,17 @@ async function runParallelWithTui(
         currentModel={config.model}
         sandboxConfig={config.sandbox}
         resolvedSandboxMode={resolvedSandboxMode}
-        isParallelMode={true}
-        parallelWorkers={parallelState.workers}
-        parallelWorkerOutputs={parallelState.workerOutputs}
-        parallelMergeQueue={parallelState.mergeQueue}
-        parallelCurrentGroup={parallelState.currentGroup}
-        parallelTotalGroups={parallelState.totalGroups}
-        parallelConflicts={parallelState.conflicts}
-        parallelConflictResolutions={parallelState.conflictResolutions}
-        parallelConflictTaskId={parallelState.conflictTaskId}
-        parallelConflictTaskTitle={parallelState.conflictTaskTitle}
-        parallelAiResolving={parallelState.aiResolving}
+          isParallelMode={true}
+          parallelWorkers={parallelState.workers}
+          parallelWorkerOutputs={parallelState.workerOutputs}
+          parallelMergeQueue={parallelState.mergeQueue}
+          parallelCurrentGroup={parallelState.currentGroup}
+          parallelTotalGroups={parallelState.totalGroups}
+          parallelConflicts={parallelState.conflicts}
+          parallelConflictResolutions={parallelState.conflictResolutions}
+          parallelConflictTaskId={parallelState.conflictTaskId}
+          parallelConflictTaskTitle={parallelState.conflictTaskTitle}
+          parallelAiResolving={parallelState.aiResolving}
         parallelCurrentlyResolvingFile={parallelState.currentlyResolvingFile}
         parallelShowConflicts={parallelState.showConflicts}
         parallelTaskIdToWorkerId={parallelState.taskIdToWorkerId}
@@ -3111,7 +3109,7 @@ async function runParallelWithTui(
             refreshTimer
           );
         }}
-      />
+        />
     );
   }
 

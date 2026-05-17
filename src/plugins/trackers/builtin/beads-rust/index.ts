@@ -731,6 +731,10 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
       };
     }
 
+    // Auto-close parent tasks when all children are complete
+    // This handles user-story -> epic and task -> user-story cascades
+    await this.autoCloseParentsIfChildrenComplete(id);
+
     // Fetch the updated task
     const task = await this.getTask(id);
 
@@ -739,6 +743,40 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
       message: `Task ${id} closed successfully`,
       task,
     };
+  }
+
+  /**
+   * Auto-close parent tasks (user-story, epic) when all their children are completed.
+   * This cascades upward: when all tasks in a user-story are done, close the user-story;
+   * when all user-stories in an epic are done, close the epic.
+   */
+  private async autoCloseParentsIfChildrenComplete(_childTaskId: string): Promise<void> {
+    // Fetch all tasks once
+    const allTasks = await this.getTasks({ status: ['open', 'in_progress', 'completed'] });
+    const openParents = allTasks.filter((t) => t.status === 'open');
+    const completedTaskIds = new Set(
+      allTasks.filter((t) => t.status === 'completed').map((t) => t.id)
+    );
+
+    for (const parentTask of openParents) {
+      // Get all children of this parent
+      const childIds = await this.getChildIds(parentTask.id);
+      if (childIds.size === 0) continue;
+
+      // Check if all children are completed
+      const allChildrenCompleted = [...childIds].every((childId) => completedTaskIds.has(childId));
+
+      if (allChildrenCompleted) {
+        // Close the parent
+        const closeArgs = ['close', parentTask.id, '--reason', `All ${childIds.size} child tasks completed`];
+        const { exitCode } = await execBr(closeArgs, this.workingDir);
+
+        if (exitCode === 0) {
+          // Add to completed set so parent-of-parent checks work
+          completedTaskIds.add(parentTask.id);
+        }
+      }
+    }
   }
 
   async updateTaskStatus(
