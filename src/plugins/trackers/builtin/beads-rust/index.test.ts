@@ -1131,6 +1131,60 @@ describe('BeadsRustTrackerPlugin', () => {
       expect(task).toBeUndefined();
       expect(mockSpawnArgs[0]?.args).toEqual(['ready', '--json', '--limit', '10']);
     });
+
+    test('excludes blocked tasks (br ready server-side filtering)', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br ready only returns unblocked tasks - blocked tasks filtered by br server-side
+        {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            issues: [
+              // This task's dependency is still open, but br ready still includes it
+              // because br tracks actual dependency state, not just status
+              { id: 'task-unblocked', title: 'Ready task', status: 'open', priority: 2 },
+              // Blocked task would NOT appear in br ready output
+            ],
+          }),
+        },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { issue_id: 'task-unblocked', depends_on_id: 'epic', type: 'parent-child', title: 'Ready task', status: 'open', priority: 2 }
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const task = await plugin.getNextTask();
+
+      // Only unblocked tasks appear in results
+      expect(task?.id).toBe('task-unblocked');
+      expect(mockSpawnArgs[0]?.args).toEqual(['ready', '--json', '--limit', '10']);
+    });
+
+    test('returns empty when all ready tasks are blocked', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br ready returns empty when no tasks are unblocked
+        {
+          exitCode: 0,
+          stdout: JSON.stringify({ issues: [] }),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const task = await plugin.getNextTask();
+
+      expect(task).toBeUndefined();
+      expect(mockSpawnArgs[0]?.args).toEqual(['ready', '--json', '--limit', '10']);
+    });
   });
 
   describe('completeTask', () => {

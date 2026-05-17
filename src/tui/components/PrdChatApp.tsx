@@ -16,6 +16,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { ChatView } from './ChatView.js';
 import { ConfirmationDialog } from './ConfirmationDialog.js';
+import { CommandPalette, type CommandEntry } from './CommandPalette.js';
 import {
   ChatEngine,
   createPrdChatEngine,
@@ -464,6 +465,43 @@ export function PrdChatApp({
   // Timeout dialog state
   const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
   const [timeoutState, setTimeoutState] = useState<TimeoutState | null>(null);
+
+  // Command palette state
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+
+  // Define available commands for the palette
+  const commandPaletteCommands: CommandEntry[] = [
+    {
+      command: '/clear',
+      description: 'Clear chat history',
+      execute: () => {
+        setMessages([WELCOME_MESSAGE]);
+        toast.showSuccess('Chat history cleared');
+      },
+    },
+    {
+      command: '/clear-images',
+      description: 'Remove all session images and pending attachments',
+      execute: async () => {
+        const result = await executeSlashCommand('/clear-images', {
+          clearPendingImages: () => clearImages(true),
+          pendingImageCount: attachedImages.length,
+        });
+        if (result.success) {
+          toast.showSuccess(result.message ?? 'Images cleared');
+        } else {
+          toast.showError(result.message ?? 'Failed to clear images');
+        }
+      },
+    },
+    {
+      command: '/exit',
+      description: 'Exit the chat',
+      execute: () => {
+        setShowQuitConfirm(true);
+      },
+    },
+  ];
 
   // Track which tracker format was selected for tasks
   const [selectedTrackerFormat, setSelectedTrackerFormat] = useState<
@@ -1036,6 +1074,13 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         return;
       }
 
+      // Open command palette with Ctrl+K (works even while loading)
+      if (key.ctrl && keyName === 'k') {
+        key.preventDefault?.();
+        setShowCommandPalette(true);
+        return;
+      }
+
       // Don't process keys while loading
       if (isLoading) {
         return;
@@ -1224,7 +1269,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
             streamingSegments={streamingSegments}
             inputPlaceholder="Ask questions or select a format..."
             error={error}
-            inputEnabled={!isLoading}
+            inputEnabled={!isLoading && !showCommandPalette}
             hint={hint}
             agentName={agent.meta.name}
             onSubmit={sendMessage}
@@ -1257,6 +1302,13 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
             <text fg={colors.status.success}>✓ {copyFeedback}</text>
           </box>
         )}
+
+        {/* Command palette */}
+        <CommandPalette
+          visible={showCommandPalette}
+          commands={commandPaletteCommands}
+          onClose={() => setShowCommandPalette(false)}
+        />
       </box>
     );
   }
@@ -1297,6 +1349,13 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
           timeoutState={timeoutState}
         />
       )}
+
+      {/* Command palette */}
+      <CommandPalette
+        visible={showCommandPalette}
+        commands={commandPaletteCommands}
+        onClose={() => setShowCommandPalette(false)}
+      />
 
       {/* Copy feedback toast - positioned at bottom right */}
       {copyFeedback && (
