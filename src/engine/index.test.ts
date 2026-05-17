@@ -610,4 +610,95 @@ describe('ExecutionEngine', () => {
       expect(refreshEvents).toHaveLength(0);
     });
   });
+
+  describe('new task detection', () => {
+    test('getNextAvailableTask picks up externally created tasks after refreshTasks', async () => {
+      // Track tasks dynamically to simulate external creation
+      let tasks = [
+        createMockTask({ id: 'task-1', status: 'open', title: 'Initial Task' }),
+      ];
+
+      const mockTracker: Partial<TrackerPlugin> = {
+        meta: {
+          id: 'mock',
+          name: 'Mock Tracker',
+          description: 'Mock tracker for testing',
+          version: '1.0.0',
+          supportsBidirectionalSync: false,
+          supportsHierarchy: false,
+          supportsDependencies: false,
+        },
+        getTasks: async () => tasks,
+        // Simulate getNextTask that respects excludeIds
+        getNextTask: async (options?: { excludeIds?: string[] }) => {
+          const excluded = new Set(options?.excludeIds ?? []);
+          return tasks.find((t) => !excluded.has(t.id) && t.status === 'open') ?? undefined;
+        },
+        getTemplate: () => `Task: {{taskId}}`,
+        getPrdContext: async () => null,
+      };
+
+      const engine = new ExecutionEngine(createMockConfig());
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = mockTracker as TrackerPlugin;
+
+      const getNextTask = (engine as unknown as { getNextAvailableTask: () => Promise<TrackerTask | null> })
+        .getNextAvailableTask.bind(engine);
+
+      // Step 1: Initially, task-1 is available
+      const initialTask = await getNextTask();
+      expect(initialTask).not.toBeNull();
+      expect(initialTask?.id).toBe('task-1');
+
+      // Step 2: Simulate completing task-1
+      tasks = [
+        createMockTask({ id: 'task-1', status: 'completed', title: 'Initial Task' }),
+      ];
+
+      // Step 3: Simulate external task creation (e.g., user creates task-2 while engine is paused)
+      // Refresh the task list to pick up the new task
+      await engine.refreshTasks();
+
+      // Step 4: Verify task-2 can be picked up (simulate new task availability)
+      tasks = [
+        createMockTask({ id: 'task-2', status: 'open', title: 'Newly Created Task' }),
+      ];
+
+      // Step 5: Call refreshTasks again to pick up the new task
+      await engine.refreshTasks();
+
+      // Step 6: getNextAvailableTask should now return the new task
+      const newTask = await getNextTask();
+      expect(newTask).not.toBeNull();
+      expect(newTask?.id).toBe('task-2');
+    });
+
+    test('getNextAvailableTask returns null when no tasks available', async () => {
+      const tasks: TrackerTask[] = [];
+
+      const mockTracker: Partial<TrackerPlugin> = {
+        meta: {
+          id: 'mock',
+          name: 'Mock Tracker',
+          description: 'Mock tracker for testing',
+          version: '1.0.0',
+          supportsBidirectionalSync: false,
+          supportsHierarchy: false,
+          supportsDependencies: false,
+        },
+        getTasks: async () => tasks,
+        getNextTask: async () => undefined,
+        getTemplate: () => `Task: {{taskId}}`,
+        getPrdContext: async () => null,
+      };
+
+      const engine = new ExecutionEngine(createMockConfig());
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = mockTracker as TrackerPlugin;
+
+      const getNextTask = (engine as unknown as { getNextAvailableTask: () => Promise<TrackerTask | null> })
+        .getNextAvailableTask.bind(engine);
+
+      const task = await getNextTask();
+      expect(task).toBeNull();
+    });
+  });
 });
