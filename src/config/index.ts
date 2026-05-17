@@ -698,6 +698,10 @@ export async function buildConfig(
       options.iterationDelay ??
       storedConfig.iterationDelay ??
       DEFAULT_CONFIG.iterationDelay,
+    taskRefreshIntervalMs:
+      options.taskRefreshIntervalMs ??
+      storedConfig.taskRefreshIntervalMs ??
+      DEFAULT_CONFIG.taskRefreshIntervalMs,
     cwd: options.cwd ?? DEFAULT_CONFIG.cwd,
     outputDir:
       options.outputDir ?? storedConfig.outputDir ?? DEFAULT_CONFIG.outputDir,

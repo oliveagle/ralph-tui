@@ -74,6 +74,7 @@ function createConfig(agentPlugin: string): RalphConfig {
     tracker: { name: 'tracker', plugin: 'json', options: {} },
     maxIterations: 10,
     iterationDelay: 0,
+    taskRefreshIntervalMs: 0,
     outputDir: '/tmp/ralph-switch-test/output',
     progressFile: '/tmp/ralph-switch-test/progress.md',
     showTui: false,

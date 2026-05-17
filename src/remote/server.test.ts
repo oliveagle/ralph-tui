@@ -23,6 +23,7 @@ function createMockConfig(): RalphConfig {
     cwd: '/tmp/test-project',
     maxIterations: 5,
     iterationDelay: 100,
+    taskRefreshIntervalMs: 0,
     outputDir: '/tmp/output',
     progressFile: '/tmp/progress.md',
     sessionId: 'test-session',

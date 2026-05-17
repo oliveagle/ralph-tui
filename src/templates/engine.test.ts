@@ -64,6 +64,7 @@ describe('template engine Jira support', () => {
       cwd: tempDir,
       maxIterations: 10,
       iterationDelay: 0,
+      taskRefreshIntervalMs: 0,
       outputDir: '.ralph-tui/iterations',
       progressFile: '.ralph-tui/progress.md',
       showTui: true,

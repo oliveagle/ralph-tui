@@ -191,6 +191,9 @@ export interface RuntimeOptions {
   /** Delay between iterations in milliseconds */
   iterationDelay?: number;
 
+  /** Background task refresh interval in milliseconds */
+  taskRefreshIntervalMs?: number;
+
   /** Working directory for execution */
   cwd?: string;
 
@@ -251,6 +254,9 @@ export interface StoredConfig {
 
   /** Default iteration delay in milliseconds */
   iterationDelay?: number;
+
+  /** Background task refresh interval in milliseconds */
+  taskRefreshIntervalMs?: number;
 
   /** Configured agent plugins */
   agents?: AgentPluginConfig[];
@@ -376,6 +382,13 @@ export interface RalphConfig {
   /** Delay between iterations in milliseconds */
   iterationDelay: number;
 
+  /**
+   * Background task refresh interval in milliseconds.
+   * When > 0, the engine will refresh the task list periodically during execution.
+   * When 0 (default), tasks are only refreshed at the start of each iteration.
+   */
+  taskRefreshIntervalMs: number;
+
   /** Working directory */
   cwd: string;
 
@@ -462,6 +475,7 @@ export const DEFAULT_ERROR_HANDLING: ErrorHandlingConfig = {
 export const DEFAULT_CONFIG: Omit<RalphConfig, "agent" | "tracker"> = {
   maxIterations: 10,
   iterationDelay: 1000,
+  taskRefreshIntervalMs: 0,
   cwd: process.cwd(),
   outputDir: ".ralph-tui/iterations",
   progressFile: ".ralph-tui/progress.md",

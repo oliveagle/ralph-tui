@@ -271,6 +271,8 @@ export class ExecutionEngine {
   private forcedTask: TrackerTask | null = null;
   /** Track if the forced task has been processed (prevents infinite loop on skip/fail) */
   private forcedTaskProcessed = false;
+  /** Background timer for periodic task list refresh during execution */
+  private taskRefreshTimer: NodeJS.Timeout | null = null;
 
   constructor(config: RalphConfig) {
     this.config = config;
@@ -444,6 +446,42 @@ export class ExecutionEngine {
   }
 
   /**
+   * Start the background task refresh timer.
+   * This periodically refreshes the task list during execution to detect new tasks.
+   */
+  private startTaskRefreshTimer(): void {
+    // Only start if interval is configured and greater than 0
+    if (this.config.taskRefreshIntervalMs <= 0) {
+      return;
+    }
+
+    // Clear any existing timer
+    this.stopTaskRefreshTimer();
+
+    this.taskRefreshTimer = setInterval(async () => {
+      // Only refresh if we're running (not paused or stopping)
+      if (this.state.status === 'running' && !this.shouldStop && this.tracker) {
+        try {
+          await this.refreshTasks();
+        } catch {
+          // Silently ignore errors during background refresh
+          // The iteration-level refresh will handle any tracker issues
+        }
+      }
+    }, this.config.taskRefreshIntervalMs);
+  }
+
+  /**
+   * Stop the background task refresh timer.
+   */
+  private stopTaskRefreshTimer(): void {
+    if (this.taskRefreshTimer) {
+      clearInterval(this.taskRefreshTimer);
+      this.taskRefreshTimer = null;
+    }
+  }
+
+  /**
    * Generate a preview of the prompt that would be sent to the agent for a given task.
    * Useful for debugging and understanding what the agent will receive.
    *
@@ -552,7 +590,11 @@ export class ExecutionEngine {
    * Main execution loop
    */
   private async runLoop(): Promise<void> {
-    while (!this.shouldStop) {
+    // Start background task refresh timer if configured
+    this.startTaskRefreshTimer();
+
+    try {
+      while (!this.shouldStop) {
       // Check if pausing - if so, transition to paused and wait
       if (this.state.status === 'pausing') {
         this.state.status = 'paused';
@@ -666,6 +708,10 @@ export class ExecutionEngine {
       if (this.config.iterationDelay > 0 && !this.shouldStop) {
         await this.delay(this.config.iterationDelay);
       }
+    }
+    } finally {
+      // Clean up background refresh timer when loop exits
+      this.stopTaskRefreshTimer();
     }
   }
 
@@ -1484,6 +1530,9 @@ export class ExecutionEngine {
   async stop(): Promise<void> {
     this.shouldStop = true;
     this.state.status = 'stopping';
+
+    // Clean up background refresh timer
+    this.stopTaskRefreshTimer();
 
     // Interrupt current execution if any
     if (this.currentExecution) {
