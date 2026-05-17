@@ -64,3 +64,6 @@ testing/.test-workspace-path
 
 # Ralph TUI parallel execution worktrees
 .ralph-tui/worktrees/
+
+# beads-rust internal backups (not source of truth - .beads/ is)
+.beads/.br_history/
