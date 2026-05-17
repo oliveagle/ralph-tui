@@ -173,6 +173,7 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
   private model?: string;
   private yoloMode = true;
   protected override defaultTimeout = 0;
+  private detectResult?: AgentDetectResult;
 
   override async initialize(config: Record<string, unknown>): Promise<void> {
     await super.initialize(config);
@@ -194,31 +195,43 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
     const resolvedCommand = await this.resolveCommandPath();
 
     if (!resolvedCommand) {
-      return {
+      this.detectResult = {
         available: false,
         error: this.getCommandNotFoundMessage(),
       };
+      return this.detectResult;
     }
 
     const commandPath = resolvedCommand.executablePath;
     const versionResult = await this.runVersion(commandPath);
 
     if (!versionResult.success) {
-      return {
+      this.detectResult = {
         available: false,
         executablePath: commandPath,
         error: versionResult.error,
       };
+      return this.detectResult;
     }
 
     // Store the detected path for use in execute()
     this.commandPath = commandPath;
 
-    return {
+    this.detectResult = {
       available: true,
       version: versionResult.version,
       executablePath: commandPath,
     };
+    return this.detectResult;
+  }
+
+  override async isReady(): Promise<boolean> {
+    // Use cached detect result if available
+    if (this.detectResult) {
+      return this.detectResult.available;
+    }
+    const result = await this.detect();
+    return result.available;
   }
 
   protected override getCommandNotFoundMessage(): string {
