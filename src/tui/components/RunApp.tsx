@@ -12,7 +12,7 @@ import { useState, useCallback, useEffect, useMemo, useRef, startTransition } fr
 import { colors, layout } from '../theme.js';
 import type { RalphStatus, TaskStatus } from '../theme.js';
 import type { TaskItem, BlockerInfo, DetailsViewMode, IterationTimingInfo, SubagentTreeNode } from '../types.js';
-import { preserveCurrentSessionCompletions } from '../task-state.js';
+import { preserveCurrentSessionCompletions, markNewTasks } from '../task-state.js';
 import { Header } from './Header.js';
 import { Footer } from './Footer.js';
 import { LeftPanel } from './LeftPanel.js';
@@ -2018,12 +2018,11 @@ export function RunApp({
 
         case 'tasks:refreshed':
           // Update task list with fresh data from tracker
-          setTasks((prev) =>
-            preserveCurrentSessionCompletions(
-              prev,
-              convertTasksWithDependencyStatus(event.tasks)
-            )
-          );
+          setTasks((prev) => {
+            const converted = convertTasksWithDependencyStatus(event.tasks);
+            const newMarked = markNewTasks(prev, converted);
+            return preserveCurrentSessionCompletions(prev, newMarked);
+          });
           break;
 
         case 'engine:iterations-added':

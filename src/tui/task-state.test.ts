@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import type { TaskItem } from './types.js';
-import { preserveCurrentSessionCompletions } from './task-state.js';
+import { preserveCurrentSessionCompletions, markNewTasks } from './task-state.js';
 
 function createTaskItem(id: string, status: TaskItem['status']): TaskItem {
   return {
@@ -70,5 +70,61 @@ describe('preserveCurrentSessionCompletions', () => {
     const result = preserveCurrentSessionCompletions(previousTasks, refreshedTasks);
 
     expect(result[0]?.status).toBe('active');
+  });
+});
+
+describe('markNewTasks', () => {
+  test('marks tasks as new when they do not exist in previous set', () => {
+    const previousTasks: TaskItem[] = [
+      createTaskItem('task-1', 'done'),
+    ];
+    const refreshedTasks: TaskItem[] = [
+      createTaskItem('task-1', 'closed'),
+      createTaskItem('task-2', 'actionable'),
+    ];
+
+    const result = markNewTasks(previousTasks, refreshedTasks);
+
+    expect(result[0]?.isNew).toBeUndefined();
+    expect(result[1]?.isNew).toBe(true);
+  });
+
+  test('does not mark existing tasks as new', () => {
+    const previousTasks: TaskItem[] = [
+      createTaskItem('task-1', 'actionable'),
+    ];
+    const refreshedTasks: TaskItem[] = [
+      createTaskItem('task-1', 'actionable'),
+      createTaskItem('task-2', 'actionable'),
+    ];
+
+    const result = markNewTasks(previousTasks, refreshedTasks);
+
+    expect(result[0]?.isNew).toBeUndefined();
+    expect(result[1]?.isNew).toBe(true);
+  });
+
+  test('returns all tasks unmarked when previous set is empty', () => {
+    const previousTasks: TaskItem[] = [];
+    const refreshedTasks: TaskItem[] = [
+      createTaskItem('task-1', 'actionable'),
+      createTaskItem('task-2', 'actionable'),
+    ];
+
+    const result = markNewTasks(previousTasks, refreshedTasks);
+
+    expect(result[0]?.isNew).toBe(true);
+    expect(result[1]?.isNew).toBe(true);
+  });
+
+  test('handles empty refreshed tasks gracefully', () => {
+    const previousTasks: TaskItem[] = [
+      createTaskItem('task-1', 'actionable'),
+    ];
+    const refreshedTasks: TaskItem[] = [];
+
+    const result = markNewTasks(previousTasks, refreshedTasks);
+
+    expect(result).toHaveLength(0);
   });
 });

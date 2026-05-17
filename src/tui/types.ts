@@ -72,6 +72,8 @@ export interface TaskItem {
   metadata?: Record<string, unknown>;
   /** Task-level token/context usage indicators */
   usage?: TokenUsageSummary;
+  /** Whether this task was newly detected during a refresh (for display) */
+  isNew?: boolean;
 }
 
 /**

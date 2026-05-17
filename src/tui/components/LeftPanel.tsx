@@ -119,6 +119,7 @@ function TaskRow({
       <text>
         <span fg={colors.fg.dim}>{indent}</span>
         <span fg={statusColor}>{statusIndicator}</span>
+        {task.isNew && <span fg={colors.accent.primary}> [new]</span>}
         {scopePrefix && <span fg={colors.accent.tertiary}> {scopePrefix}</span>}
         <span fg={idColor}> {idDisplay}</span>
         <span fg={titleColor}> {truncatedTitle}</span>
