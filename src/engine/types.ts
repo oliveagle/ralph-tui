@@ -624,6 +624,8 @@ export interface TasksRefreshedEvent extends EngineEventBase {
   type: 'tasks:refreshed';
   /** Refreshed task list */
   tasks: TrackerTask[];
+  /** Total task count (open/in_progress only) */
+  totalTasks: number;
 }
 
 /**

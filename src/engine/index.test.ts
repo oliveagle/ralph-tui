@@ -596,6 +596,27 @@ describe('ExecutionEngine', () => {
       expect(state.totalTasks).toBe(2);
     });
 
+    test('emits totalTasks in tasks:refreshed event', async () => {
+      const tasks = [
+        createMockTask({ id: 'task-1', status: 'open' }),
+        createMockTask({ id: 'task-2', status: 'in_progress' }),
+        createMockTask({ id: 'task-3', status: 'completed' }),
+        createMockTask({ id: 'task-4', status: 'open' }),
+      ];
+      const mockTracker = createMockTracker(tasks);
+      const engine = new ExecutionEngine(createMockConfig());
+      (engine as unknown as { tracker: TrackerPlugin }).tracker = mockTracker;
+
+      const events: Array<{ type: string; totalTasks?: number }> = [];
+      engine.on((event) => events.push(event as any));
+
+      await engine.refreshTasks();
+
+      const refreshEvent = events.find((e) => e.type === 'tasks:refreshed');
+      expect(refreshEvent).toBeDefined();
+      expect(refreshEvent!.totalTasks).toBe(3);
+    });
+
     test('is a no-op when no tracker', async () => {
       const engine = new ExecutionEngine(createMockConfig());
       // Ensure tracker is null (default state before initialize)

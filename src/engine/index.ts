@@ -442,6 +442,7 @@ export class ExecutionEngine {
       type: 'tasks:refreshed',
       timestamp: new Date().toISOString(),
       tasks,
+      totalTasks: this.state.totalTasks,
     });
   }
 

@@ -630,6 +630,8 @@ export function RunApp({
     }
   }, [parallelRefreshedTasks]);
 
+  // Start with tasks.length but allow override via tasks:refreshed event (open/in_progress count from engine)
+  const [runtimeTotalTasks, setRuntimeTotalTasks] = useState<number | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   // Start in 'ready' state if we have onStart callback (waiting for user to start)
   const [status, setStatus] = useState<RalphStatus>(onStart ? 'ready' : 'running');
@@ -2023,6 +2025,8 @@ export function RunApp({
             const newMarked = markNewTasks(prev, converted);
             return preserveCurrentSessionCompletions(prev, newMarked);
           });
+          // Update totalTasks with engine's count (open/in_progress only)
+          setRuntimeTotalTasks(event.totalTasks);
           break;
 
         case 'engine:iterations-added':
@@ -3011,7 +3015,8 @@ export function RunApp({
   const completedTasks = tasks.filter(
     (t) => t.status === 'done' || t.status === 'closed'
   ).length;
-  const totalTasks = tasks.length;
+  // Use engine's totalTasks count (open/in_progress only) if available from tasks:refreshed event
+  const totalTasks = runtimeTotalTasks ?? tasks.length;
 
   // Get selected task from filtered list (used for display in tasks view)
   const selectedTask = displayedTasks[selectedIndex] ?? null;
