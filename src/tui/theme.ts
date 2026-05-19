@@ -39,6 +39,7 @@ export interface ThemeColors {
     pending: string;
     blocked: string;
     error: string;
+    waiting: string;
     closed: string;
     completedLocally: string;
   };
@@ -85,6 +86,7 @@ export const defaultColors: ThemeColors = {
     pending: '#565f89',
     blocked: '#f7768e',
     error: '#f7768e',
+    waiting: '#e0af68', // Warning yellow - waiting on external conditions
     closed: '#414868',
     completedLocally: '#e0af68', // Warning yellow - task completed but not merged
   },
@@ -130,6 +132,7 @@ export const statusIndicators = {
   pending: '○',
   blocked: '⊘', // Blocked by dependencies - red no-entry
   error: '✗', // Error/failed task - red x
+  waiting: '⧖', // Waiting on external conditions - hourglass
   closed: '✓', // Same indicator as done, but will be greyed out
   completedLocally: '⚠', // Completed by agent but not merged (e.g., no commits)
   running: '▶',
@@ -273,10 +276,11 @@ export type RalphStatus = 'ready' | 'running' | 'selecting' | 'executing' | 'pau
  * - 'pending': Task waiting to be worked on (grey circle ○) - legacy, prefer actionable
  * - 'blocked': Task blocked by dependencies (red no-entry ⊘)
  * - 'error': Task execution failed (red X ✗)
+ * - 'waiting': Task waiting on external conditions/intervention (yellow hourglass ⧖)
  * - 'closed': Previously completed task (greyed out checkmark ✓ for historical tasks)
  * - 'completedLocally': Task completed by agent but not merged (yellow warning ⚠)
  */
-export type TaskStatus = 'done' | 'active' | 'actionable' | 'pending' | 'blocked' | 'error' | 'closed' | 'completedLocally';
+export type TaskStatus = 'done' | 'active' | 'actionable' | 'pending' | 'blocked' | 'error' | 'waiting' | 'closed' | 'completedLocally';
 
 /**
  * Get the color for a given task status

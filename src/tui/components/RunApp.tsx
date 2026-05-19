@@ -254,6 +254,8 @@ function trackerStatusToTaskStatus(trackerStatus: string): TaskStatus {
       return 'blocked';
     case 'cancelled':
       return 'closed'; // Show cancelled as closed (greyed out finished state)
+    case 'waiting':
+      return 'error'; // Show waiting tasks in error color to indicate intervention needed
     default:
       return 'pending';
   }
@@ -1537,9 +1539,10 @@ export function RunApp({
       pending: 2,
       blocked: 3,
       error: 4,
-      completedLocally: 5,
-      done: 6,
-      closed: 7,
+      waiting: 5,
+      completedLocally: 6,
+      done: 7,
+      closed: 8,
     };
 
     let filtered = showClosedTasks

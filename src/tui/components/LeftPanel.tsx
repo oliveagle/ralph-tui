@@ -197,8 +197,8 @@ export const LeftPanel = memo(function LeftPanel({
 
     // Sort: active tasks first, then completed by iteration (newest first)
     const sortedTasks = [...tasks].sort((a, b) => {
-      const aIsActive = ['active', 'actionable', 'pending', 'blocked'].includes(a.status);
-      const bIsActive = ['active', 'actionable', 'pending', 'blocked'].includes(b.status);
+      const aIsActive = ['active', 'actionable', 'pending', 'blocked', 'error'].includes(a.status);
+      const bIsActive = ['active', 'actionable', 'pending', 'blocked', 'error'].includes(b.status);
       if (aIsActive && !bIsActive) return -1;
       if (!aIsActive && bIsActive) return 1;
       // Within same category, newest first (higher iteration = newer)
@@ -209,7 +209,7 @@ export const LeftPanel = memo(function LeftPanel({
 
     // Active tasks are always kept
     const activeTasks = sortedTasks.filter(
-      (t) => ['active', 'actionable', 'pending', 'blocked'].includes(t.status)
+      (t) => ['active', 'actionable', 'pending', 'blocked', 'error'].includes(t.status)
     );
 
     // Completed tasks: keep up to (100 - activeCount), but always keep parents
