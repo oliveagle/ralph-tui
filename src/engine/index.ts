@@ -680,6 +680,28 @@ export class ExecutionEngine {
       // Get next task (excluding skipped tasks)
       const task = await this.getNextAvailableTask();
       if (!task) {
+        // Check if there are blocked tasks (open/in_progress tasks that are not ready)
+        const allTasks = await this.tracker!.getTasks({ status: ['open', 'in_progress'] });
+        const readyTasks = await this.tracker!.getTasks({ status: ['open', 'in_progress'], ready: true });
+        const hasBlockedTasks = allTasks.length > readyTasks.length && readyTasks.length === 0;
+
+        if (hasBlockedTasks) {
+          // Blocked tasks exist, emit a warning and keep the engine running
+          this.emit({
+            type: 'engine:warning',
+            timestamp: new Date().toISOString(),
+            code: 'blocked_tasks',
+            message: `Waiting on ${allTasks.length - readyTasks.length} blocked task(s)`,
+          });
+          // Wait before retrying (use iteration delay or default 10s)
+          const waitMs = this.config.iterationDelay > 0 ? this.config.iterationDelay : 10000;
+          await this.delay(waitMs);
+          // Refresh and try again
+          await this.refreshTasks();
+          continue;
+        }
+
+        // Truly no tasks available
         this.emit({
           type: 'engine:stopped',
           timestamp: new Date().toISOString(),
@@ -754,7 +776,7 @@ export class ExecutionEngine {
       // Delegate to tracker's getNextTask for dependency-aware ordering
       // The tracker (e.g., beads) uses bd ready which properly handles dependencies
       const task = await this.tracker!.getNextTask({
-        status: ['open', 'in_progress'],
+        status: ['open', 'in_progress', 'waiting'],
         excludeIds: excludeIds.size > 0 ? Array.from(excludeIds) : undefined,
       });
 
@@ -1040,7 +1062,7 @@ export class ExecutionEngine {
     // This saves time and tokens by avoiding redundant agent execution
     if (this.config.skipKnownCompleted !== false) {
       const freshTask = await this.tracker!.getTask(task.id);
-      if (freshTask && (freshTask.status === 'completed' || freshTask.status === 'cancelled')) {
+      if (freshTask && (freshTask.status === 'completed' || freshTask.status === 'cancelled' || freshTask.status === 'waiting')) {
         const startedAtStr = startedAt.toISOString();
         const finishedAt = new Date();
         const finishedAtStr = finishedAt.toISOString();

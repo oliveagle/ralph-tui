@@ -145,6 +145,7 @@ function mapStatus(brStatus: string): TrackerTaskStatus {
     in_progress: 'in_progress',
     closed: 'completed',
     cancelled: 'cancelled',
+    waiting: 'waiting',
     tombstone: 'cancelled',
   };
 
@@ -190,6 +191,7 @@ function mapStatusToBr(status: TrackerTaskStatus): string {
     in_progress: 'in_progress',
     completed: 'closed',
     cancelled: 'cancelled',
+    waiting: 'waiting',
     // br doesn't have a dedicated blocked status; keep as open
     blocked: 'open',
   };

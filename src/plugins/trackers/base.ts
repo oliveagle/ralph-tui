@@ -325,13 +325,14 @@ When finished, signal completion with:
       return true;
     }
 
-    // Task is ready if all dependencies are completed or cancelled
+    // Task is ready if all dependencies are completed, cancelled, or waiting
     return task.dependsOn.every((depId) => {
       const depTask = allTasks.find((t) => t.id === depId);
       return (
         !depTask ||
         depTask.status === 'completed' ||
-        depTask.status === 'cancelled'
+        depTask.status === 'cancelled' ||
+        depTask.status === 'waiting'
       );
     });
   }

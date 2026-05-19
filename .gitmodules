@@ -1,0 +1,6 @@
+[submodule "submodules/beads_rust"]
+	path = submodules/beads_rust
+	url = git@github.com:oliveagle/beads_rust.git
+[submodule "submodules/beads_viewer"]
+	path = submodules/beads_viewer
+	url = git@github.com:oliveagle/beads_viewer.git

@@ -16,6 +16,7 @@ export type TrackerTaskStatus =
   | 'open'
   | 'in_progress'
   | 'blocked'
+  | 'waiting'
   | 'completed'
   | 'cancelled';
 
