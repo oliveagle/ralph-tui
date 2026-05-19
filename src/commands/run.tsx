@@ -3700,14 +3700,20 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     console.log('');
   }
 
+  // Get tracker instance before stale recovery so it can reset external task statuses
+  trackerForRun = trackerForRun ?? await trackerRegistry.getInstance(config.tracker);
+
   // Detect and recover stale sessions EARLY (before any prompts)
   // This fixes the issue where killing the TUI mid-task leaves activeTaskIds populated
-  const staleRecovery = await detectAndRecoverStaleSession(config.cwd, checkLock);
+  const staleRecovery = await detectAndRecoverStaleSession(config.cwd, checkLock, trackerForRun);
   if (staleRecovery.wasStale) {
     console.log('');
     console.log('⚠️  Recovered stale session');
     if (staleRecovery.clearedTaskCount > 0) {
-      console.log(`   Cleared ${staleRecovery.clearedTaskCount} stuck in-progress task(s)`);
+      console.log(`   Cleared ${staleRecovery.clearedTaskCount} stuck in-progress task(s) from session`);
+    }
+    if (staleRecovery.resetTrackerCount > 0) {
+      console.log(`   Reset ${staleRecovery.resetTrackerCount} task(s) from in_progress to open in beads`);
     }
     console.log('   Session status set to "interrupted" (resumable)');
     console.log('');

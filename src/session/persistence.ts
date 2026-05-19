@@ -15,6 +15,7 @@ import type {
   ExecutionScope,
   TrackerTask,
   TrackerTaskStatus,
+  TrackerPlugin,
 } from '../plugins/trackers/types.js';
 import type { IterationResult } from '../engine/types.js';
 import type { SessionStatus } from './types.js';
@@ -557,8 +558,10 @@ export function isSessionResumable(state: PersistedSessionState): boolean {
 export interface StaleSessionRecoveryResult {
   /** Whether a stale session was detected */
   wasStale: boolean;
-  /** Number of active task IDs that were cleared */
+  /** Number of active task IDs that were cleared from internal session state */
   clearedTaskCount: number;
+  /** Number of tasks reset from in_progress to open in the external tracker (beads) */
+  resetTrackerCount: number;
   /** Previous status before recovery */
   previousStatus?: SessionStatus;
 }
@@ -572,23 +575,27 @@ export interface StaleSessionRecoveryResult {
  *
  * Recovery actions:
  * 1. Clear activeTaskIds (tasks that were being worked on)
- * 2. Set status to 'interrupted' (so it can be resumed)
- * 3. Save the recovered session
+ * 2. Reset activeTaskIds from in_progress to open in the external tracker
+ * 3. Set status to 'interrupted' (so it can be resumed)
+ * 4. Save the recovered session
  *
  * This should be called early in both run and resume commands,
  * BEFORE any prompts or session decisions are made.
  *
  * @param cwd Working directory
  * @param checkLock Function to check lock status (passed in to avoid circular deps)
+ * @param tracker Optional tracker plugin to reset external task statuses
  * @returns Recovery result
  */
 export async function detectAndRecoverStaleSession(
   cwd: string,
-  checkLock: (cwd: string) => Promise<{ isLocked: boolean; isStale: boolean }>
+  checkLock: (cwd: string) => Promise<{ isLocked: boolean; isStale: boolean }>,
+  tracker?: TrackerPlugin
 ): Promise<StaleSessionRecoveryResult> {
   const result: StaleSessionRecoveryResult = {
     wasStale: false,
     clearedTaskCount: 0,
+    resetTrackerCount: 0,
   };
 
   // Check if session file exists
@@ -620,6 +627,19 @@ export async function detectAndRecoverStaleSession(
   result.wasStale = true;
   result.previousStatus = session.status;
   result.clearedTaskCount = session.activeTaskIds?.length ?? 0;
+
+  // Reset active tasks in the external tracker (beads)
+  const activeTaskIds = session.activeTaskIds ?? [];
+  if (tracker && activeTaskIds.length > 0) {
+    for (const taskId of activeTaskIds) {
+      try {
+        await tracker.updateTaskStatus(taskId, 'open');
+        result.resetTrackerCount++;
+      } catch {
+        // Silently continue on individual task reset failures
+      }
+    }
+  }
 
   // Clear active tasks and set status to interrupted
   const recoveredSession: PersistedSessionState = {

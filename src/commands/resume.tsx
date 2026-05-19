@@ -589,19 +589,6 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
   const { cwd, registryEntry } = resolved;
   const { headless, force } = parsedArgs;
 
-  // Detect and recover stale sessions EARLY
-  // This fixes the issue where killing the TUI mid-task leaves activeTaskIds populated
-  const staleRecovery = await detectAndRecoverStaleSession(cwd, checkLock);
-  if (staleRecovery.wasStale) {
-    console.log('');
-    console.log('⚠️  Recovered stale session');
-    if (staleRecovery.clearedTaskCount > 0) {
-      console.log(`   Cleared ${staleRecovery.clearedTaskCount} stuck in-progress task(s)`);
-    }
-    console.log('   Session status set to "interrupted" (resumable)');
-    console.log('');
-  }
-
   // Load session
   const persistedState = await loadPersistedSession(cwd);
   if (!persistedState) {
@@ -670,6 +657,25 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Get tracker instance before stale recovery so it can reset external task statuses
+  const trackerRegistry = getTrackerRegistry();
+  const tracker = await trackerRegistry.getInstance(config.tracker);
+
+  // Detect and recover stale sessions (now with tracker available)
+  const staleRecovery = await detectAndRecoverStaleSession(cwd, checkLock, tracker);
+  if (staleRecovery.wasStale) {
+    console.log('');
+    console.log('\u26a0\ufe0f  Recovered stale session');
+    if (staleRecovery.clearedTaskCount > 0) {
+      console.log(`   Cleared ${staleRecovery.clearedTaskCount} stuck in-progress task(s) from session`);
+    }
+    if (staleRecovery.resetTrackerCount > 0) {
+      console.log(`   Reset ${staleRecovery.resetTrackerCount} task(s) from in_progress to open in beads`);
+    }
+    console.log('   Session status set to "interrupted" (resumable)');
+    console.log('');
+  }
+
   // Acquire lock
   const lockAcquired = await acquireLock(cwd, persistedState.sessionId);
   if (!lockAcquired && !force) {
@@ -696,7 +702,7 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
   // Create and initialize engine
   const engine = new ExecutionEngine(config);
   let executionScopes: ExecutionScope[] = [];
-  let trackerForResume: TrackerPlugin | undefined;
+  let trackerForResume: TrackerPlugin | undefined = tracker;
 
   try {
     if (config.epicIds && config.epicIds.length > 1) {
