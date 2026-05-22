@@ -4256,6 +4256,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         // Parallel headless mode — log events to console
         let parallelSignalInterrupted = false;
         let parallelExecutionPromise: Promise<void> | null = null;
+        let progressTimer: ReturnType<typeof setInterval> | null = null;
 
         parallelExecutor.on((event) => {
           const time = new Date(event.timestamp).toLocaleTimeString();
@@ -4326,6 +4327,12 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           parallelSignalInterrupted = true;
           console.log('\n[INFO] [parallel] Received signal, stopping parallel execution...');
 
+          // Clear progress timer
+          if (progressTimer) {
+            clearInterval(progressTimer);
+            progressTimer = null;
+          }
+
           // Stop the parallel executor
           await parallelExecutor.stop();
 
@@ -4358,6 +4365,35 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
         try {
           parallelExecutionPromise = parallelExecutor.execute();
+
+          // Start progress logging timer (every 5 seconds)
+          progressTimer = setInterval(() => {
+            const state = parallelExecutor.getState();
+            const runningWorkers = state.workers.filter((w) => w.status === 'running');
+            const completedWorkers = state.workers.filter((w) => w.status === 'completed');
+            const failedWorkers = state.workers.filter((w) => w.status === 'failed');
+
+            // Get current task statuses from tracker
+            tracker.getTasks({ status: ['open', 'in_progress'] }).then((allTasks) => {
+              const inProgress = allTasks.filter((t) => t.status === 'in_progress').length;
+              const open = allTasks.filter((t) => t.status === 'open').length;
+              const elapsed = state.startedAt
+                ? Math.floor((Date.now() - new Date(state.startedAt).getTime()) / 1000)
+                : 0;
+              const elapsedStr = elapsed >= 3600
+                ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`
+                : elapsed >= 60
+                  ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+                  : `${elapsed}s`;
+
+              console.log(
+                `[PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${state.totalTasksCompleted}/${state.totalTasks}`
+              );
+            }).catch(() => {
+              // Best effort — don't let progress timer fail
+            });
+          }, 5000);
+
           await parallelExecutionPromise;
           // Get branch info after execution completes
           sessionBranchForGuidance = parallelExecutor.getSessionBranch();
@@ -4366,6 +4402,10 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           returnToOriginalBranchErrorForGuidance = parallelExecutor.getReturnToOriginalBranchError();
         } finally {
           parallelExecutionPromise = null;
+          if (progressTimer) {
+            clearInterval(progressTimer);
+            progressTimer = null;
+          }
           // Remove handlers after execution completes
           process.removeListener('SIGINT', handleParallelSignal);
           process.removeListener('SIGTERM', handleParallelSignal);
