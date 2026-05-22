@@ -780,6 +780,10 @@ export class ParallelExecutor {
     // Create workers
     // Track branch names from worktree acquisition for failure result construction
     const branchNames: string[] = [];
+    // Track tasks that failed to be claimed (blocked by dependencies)
+    const blockedTasks: TrackerTask[] = [];
+    // Track tasks that were successfully claimed
+    const claimedTasks: TrackerTask[] = [];
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
@@ -797,6 +801,17 @@ export class ParallelExecutor {
         }
       );
       branchNames.push(worktreeInfo.branch);
+
+      // Try to mark task as in_progress. For beads-rust, this triggers claim validation.
+      // If the task is blocked by dependencies, the claim will fail — we should skip it.
+      const updatedTask = await this.tracker.updateTaskStatus(task.id, 'in_progress');
+      if (!updatedTask) {
+        // Task is blocked by dependencies or claim failed — release worktree and skip
+        this.worktreeManager.release(`worker-${workerId}`);
+        blockedTasks.push(task);
+        continue;
+      }
+      claimedTasks.push(task);
 
       const worker = new Worker(
         {
@@ -824,13 +839,21 @@ export class ParallelExecutor {
       // Initialize the worker engine with the shared tracker
       await worker.initialize(this.baseConfig, this.tracker);
       this.activeWorkers.push(worker);
+    }
 
-      // Mark task as in_progress in the tracker
-      try {
-        await this.tracker.updateTaskStatus(task.id, 'in_progress');
-      } catch {
-        // Non-fatal — tracker update may fail for some trackers
-      }
+    // If no tasks were claimed, return empty results
+    if (this.activeWorkers.length === 0) {
+      return blockedTasks.map((task) => ({
+        workerId: '',
+        task,
+        success: false,
+        iterationsRun: 0,
+        taskCompleted: false,
+        durationMs: 0,
+        error: 'Task is blocked by dependencies — could not claim',
+        branchName: '',
+        commitCount: 0,
+      }));
     }
 
     // Start all workers in parallel
@@ -843,7 +866,7 @@ export class ParallelExecutor {
         return result.value;
       }
       // Worker promise rejected — create a failure result
-      const task = tasks[i];
+      const task = claimedTasks[i];
       return {
         workerId: this.activeWorkers[i].id,
         task,
@@ -860,7 +883,7 @@ export class ParallelExecutor {
       };
     });
 
-    // Release worktrees (use "worker-" prefix to match acquire's worktreeId format)
+    // Release worktrees for active workers (use "worker-" prefix to match acquire's worktreeId format)
     for (const worker of this.activeWorkers) {
       this.worktreeManager.release(`worker-${worker.id}`);
     }
