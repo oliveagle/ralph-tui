@@ -4275,6 +4275,9 @@ export async function executeRunCommand(args: string[]): Promise<void> {
               persistedState = addActiveTask(persistedState, event.task.id);
               savePersistedSession(persistedState).catch(() => {});
               break;
+            case 'worker:progress':
+              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} iteration ${event.currentIteration}/${event.maxIterations}`);
+              break;
             case 'worker:completed':
               console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}`);
               // Remove task from active list in persisted session state
@@ -4286,6 +4289,19 @@ export async function executeRunCommand(args: string[]): Promise<void> {
               // Remove task from active list in persisted session state
               persistedState = removeActiveTask(persistedState, event.task.id);
               savePersistedSession(persistedState).catch(() => {});
+              break;
+            case 'worker:output':
+              if (event.stream === 'stdout') {
+                const lines = event.data.split('\n').filter((l: string) => l.trim());
+                for (const line of lines.slice(-3)) {
+                  console.log(`[${time}] [OUTPUT] [${event.workerId}] ${line}`);
+                }
+              } else if (event.stream === 'stderr') {
+                const lines = event.data.split('\n').filter((l: string) => l.trim());
+                for (const line of lines.slice(-3)) {
+                  console.log(`[${time}] [STDERR] [${event.workerId}] ${line}`);
+                }
+              }
               break;
             case 'merge:completed':
               console.log(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)`);
