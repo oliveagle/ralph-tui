@@ -626,10 +626,14 @@ export class ParallelExecutor {
 
           if (mergeResult?.success) {
             // Merge succeeded - mark task as complete in tracker
+            // Note: This happens AFTER restoreTrackerState to ensure we don't overwrite completion
             try {
-              await this.tracker.completeTask(result.task.id);
-            } catch {
-              // Log but don't fail after successful merge
+              const completeResult = await this.tracker.completeTask(result.task.id);
+              if (!completeResult.success) {
+                console.error(`[parallel] Failed to complete task ${result.task.id}: ${completeResult.message}`);
+              }
+            } catch (err) {
+              console.error(`[parallel] Exception completing task ${result.task.id}:`, err);
             }
             // Merge worker's progress.md into main so subsequent workers see learnings
             await this.mergeProgressFile(result);
