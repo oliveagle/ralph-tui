@@ -4277,8 +4277,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         let parallelSignalInterrupted = false;
         let parallelExecutionPromise: Promise<void> | null = null;
         let progressTimer: ReturnType<typeof setInterval> | null = null;
-
-        // Create log file for parallel headless execution
+        let deadlockRestartAttempted = false;
         const logDir = join(config.cwd, '.ralph-tui');
         let logFile: string | null = null;
         let logStream: import('node:fs').WriteStream | null = null;
@@ -4367,6 +4366,41 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           }
         });
 
+        // Helper to stop parallel execution and reset state for restart
+        const prepareParallelRestart = async (reason: string): Promise<void> => {
+          const time = new Date().toLocaleTimeString();
+          writeLog(`\n[${time}] [WARN] [parallel] ${reason}\n`);
+          writeLog(`[${time}] [INFO] [parallel] Preparing for restart...\n`);
+
+          // Clear progress timer
+          if (progressTimer) {
+            clearInterval(progressTimer);
+            progressTimer = null;
+          }
+
+          // Stop the parallel executor
+          await parallelExecutor.stop();
+
+          // Wait for execute() to unwind
+          if (parallelExecutionPromise) {
+            await parallelExecutionPromise.catch(() => {});
+          }
+
+          // Reset any in_progress tasks back to open
+          const activeTasks = getActiveTasks(persistedState);
+          if (activeTasks.length > 0) {
+            writeLog(`[${time}] [INFO] [parallel] Resetting ${activeTasks.length} in_progress task(s) to open...\n`);
+            for (const taskId of activeTasks) {
+              try {
+                await tracker.updateTaskStatus(taskId, 'open');
+              } catch {
+                // Best effort reset
+              }
+            }
+            persistedState = clearActiveTasks(persistedState);
+          }
+        };
+
         // Signal handlers for graceful shutdown in parallel headless mode
         const handleParallelSignal = async (): Promise<void> => {
           if (parallelSignalInterrupted) {
@@ -4413,58 +4447,112 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         process.on('SIGINT', handleParallelSignal);
         process.on('SIGTERM', handleParallelSignal);
 
-        try {
-          parallelExecutionPromise = parallelExecutor.execute();
+        // Main parallel execution loop (handles deadlock restarts)
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          // Reset for new execution
+          deadlockRestartAttempted = false;
+          parallelExecutor.reset();
 
-          // Start progress logging timer (every 5 seconds)
-          progressTimer = setInterval(() => {
-            const state = parallelExecutor.getState();
-            const runningWorkers = state.workers.filter((w) => w.status === 'running');
-            const completedWorkers = state.workers.filter((w) => w.status === 'completed');
-            const failedWorkers = state.workers.filter((w) => w.status === 'failed');
+          try {
+            parallelExecutionPromise = parallelExecutor.execute();
 
-            // Get current task statuses from tracker
-            tracker.getTasks({ status: ['open', 'in_progress'] }).then((allTasks) => {
-              const inProgress = allTasks.filter((t) => t.status === 'in_progress').length;
-              const open = allTasks.filter((t) => t.status === 'open').length;
-              const elapsed = state.startedAt
-                ? Math.floor((Date.now() - new Date(state.startedAt).getTime()) / 1000)
-                : 0;
-              const elapsedStr = elapsed >= 3600
-                ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`
-                : elapsed >= 60
-                  ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
-                  : `${elapsed}s`;
+            // Start progress logging timer (every 5 seconds)
+            progressTimer = setInterval(() => {
+              const state = parallelExecutor.getState();
+              const runningWorkers = state.workers.filter((w) => w.status === 'running');
+              const completedWorkers = state.workers.filter((w) => w.status === 'completed');
+              const failedWorkers = state.workers.filter((w) => w.status === 'failed');
 
-              const time = new Date().toLocaleTimeString();
-              const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${state.totalTasksCompleted}/${state.totalTasks}\n`;
-              writeLog(progressLine);
-            }).catch(() => {
-              // Best effort — don't let progress timer fail
-            });
-          }, 5000);
+              // Get current task statuses from tracker
+              tracker.getTasks({ status: ['open', 'in_progress'] }).then(async (allTasks) => {
+                const inProgress = allTasks.filter((t) => t.status === 'in_progress').length;
+                const open = allTasks.filter((t) => t.status === 'open').length;
+                const elapsed = state.startedAt
+                  ? Math.floor((Date.now() - new Date(state.startedAt).getTime()) / 1000)
+                  : 0;
+                const elapsedStr = elapsed >= 3600
+                  ? `${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`
+                  : elapsed >= 60
+                    ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+                    : `${elapsed}s`;
 
-          await parallelExecutionPromise;
-          // Get branch info after execution completes
-          sessionBranchForGuidance = parallelExecutor.getSessionBranch();
-          originalBranchForGuidance = parallelExecutor.getOriginalBranch();
-          preservedRecoveryWorktreesForGuidance = parallelExecutor.getPreservedRecoveryWorktrees();
-          returnToOriginalBranchErrorForGuidance = parallelExecutor.getReturnToOriginalBranchError();
-        } finally {
-          parallelExecutionPromise = null;
-          if (progressTimer) {
-            clearInterval(progressTimer);
-            progressTimer = null;
-          }
-          // Remove handlers after execution completes
-          process.removeListener('SIGINT', handleParallelSignal);
-          process.removeListener('SIGTERM', handleParallelSignal);
-          // Close log file if open
-          if (logStream) {
-            logStream.end();
-            if (logFile) {
-              console.log(`Parallel execution log saved to: ${logFile}`);
+                const time = new Date().toLocaleTimeString();
+
+                // Deadlock detection:
+                // 1. No running workers but there are still tasks to do (workers died/stuck)
+                // 2. Good progress made (>50% of total tasks completed) - restart to pick up fresh state
+                const totalTasks = state.totalTasks;
+                const completedCount = state.totalTasksCompleted;
+                const hasRunningWorkers = runningWorkers.length > 0;
+                const hasTasksRemaining = inProgress > 0 || open > 0;
+                const hasGoodProgress = totalTasks > 0 && completedCount > totalTasks / 2;
+
+                const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks}\n`;
+                writeLog(progressLine);
+
+                // Check for deadlock conditions (only in autoLoop mode and if not already restarting)
+                if (options.autoLoop && !deadlockRestartAttempted) {
+                  const isDeadlocked = !hasRunningWorkers && hasTasksRemaining;
+                  const shouldRestart = isDeadlocked || hasGoodProgress;
+
+                  if (shouldRestart) {
+                    deadlockRestartAttempted = true;
+                    const reason = isDeadlocked
+                      ? 'Deadlock detected: no running workers but tasks remain'
+                      : `Good progress achieved: ${completedCount}/${totalTasks} tasks completed (${Math.round((completedCount / totalTasks) * 100)}%)`;
+                    writeLog(`[${time}] [INFO] [parallel] ${reason} - initiating internal restart\n`);
+
+                    // Stop and restart parallel execution
+                    prepareParallelRestart(reason).then(() => {
+                      // Break out of the execution promise wait
+                      parallelExecutor.stop();
+                    });
+                  }
+                }
+              }).catch(() => {
+                // Best effort — don't let progress timer fail
+              });
+            }, 5000);
+
+            await parallelExecutionPromise;
+            // Execution completed normally - exit the loop
+            break;
+          } catch (error) {
+            const time = new Date().toLocaleTimeString();
+            writeLog(`[${time}] [ERROR] [parallel] Execution error: ${error instanceof Error ? error.message : String(error)}\n`);
+
+            // Check if we should retry
+            if (!options.autoLoop || parallelSignalInterrupted) {
+              throw error;
             }
+            // For autoLoop, reset and retry
+            writeLog(`[${time}] [INFO] [parallel] Resetting executor for retry...\n`);
+            parallelExecutor.reset();
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+          } finally {
+            parallelExecutionPromise = null;
+            if (progressTimer) {
+              clearInterval(progressTimer);
+              progressTimer = null;
+            }
+            // Remove handlers after execution completes
+            process.removeListener('SIGINT', handleParallelSignal);
+            process.removeListener('SIGTERM', handleParallelSignal);
+          }
+        }
+
+        // Get branch info after execution completes
+        sessionBranchForGuidance = parallelExecutor.getSessionBranch();
+        originalBranchForGuidance = parallelExecutor.getOriginalBranch();
+        preservedRecoveryWorktreesForGuidance = parallelExecutor.getPreservedRecoveryWorktrees();
+        returnToOriginalBranchErrorForGuidance = parallelExecutor.getReturnToOriginalBranchError();
+
+        // Close log file if open
+        if (logStream) {
+          logStream.end();
+          if (logFile) {
+            console.log(`Parallel execution log saved to: ${logFile}`);
           }
         }
       }
