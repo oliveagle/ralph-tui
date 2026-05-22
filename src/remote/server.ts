@@ -1511,6 +1511,9 @@ export class RemoteServer {
         tasks = tasks.filter((t) => allowedIds.has(t.id));
       }
 
+      // Filter out epics - they cannot be claimed/processed by workers
+      tasks = tasks.filter((t) => t.type !== 'epic');
+
       if (tasks.length === 0) {
         this.orchestrationStarting = false;
         const response = createMessage<OrchestrateStartResponseMessage>('orchestrate:start_response', {

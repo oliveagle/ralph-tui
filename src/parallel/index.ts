@@ -289,6 +289,9 @@ export class ParallelExecutor {
         tasks = tasks.filter((t) => filteredIdSet.has(t.id));
       }
 
+      // Filter out epics - they cannot be claimed/processed by workers
+      tasks = tasks.filter((t) => t.type !== 'epic');
+
       if (tasks.length === 0) {
         this.status = 'completed';
         return;

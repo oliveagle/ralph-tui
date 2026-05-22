@@ -372,9 +372,9 @@ export class ExecutionEngine {
       // Sync tracker
       await this.tracker.sync();
 
-      // Get initial task count
+      // Get initial task count (exclude epics)
       const tasks = await this.tracker.getTasks({ status: ['open', 'in_progress'] });
-      this.state.totalTasks = tasks.length;
+      this.state.totalTasks = tasks.filter((t) => t.type !== 'epic').length;
     }
   }
 
@@ -682,8 +682,10 @@ export class ExecutionEngine {
       if (!task) {
         // Check if there are blocked tasks (open/in_progress tasks that are not ready)
         const allTasks = await this.tracker!.getTasks({ status: ['open', 'in_progress'] });
+        const actionableTasks = allTasks.filter((t) => t.type !== 'epic');
         const readyTasks = await this.tracker!.getTasks({ status: ['open', 'in_progress'], ready: true });
-        const hasBlockedTasks = allTasks.length > readyTasks.length && readyTasks.length === 0;
+        const actionableReadyTasks = readyTasks.filter((t) => t.type !== 'epic');
+        const hasBlockedTasks = actionableTasks.length > actionableReadyTasks.length && actionableReadyTasks.length === 0;
 
         if (hasBlockedTasks) {
           // Blocked tasks exist, emit a warning and keep the engine running
@@ -695,6 +697,23 @@ export class ExecutionEngine {
           });
           // Wait before retrying (use iteration delay or default 10s)
           const waitMs = this.config.iterationDelay > 0 ? this.config.iterationDelay : 10000;
+          await this.delay(waitMs);
+          // Refresh and try again
+          await this.refreshTasks();
+          continue;
+        }
+
+        // Check if there are still open tasks - if yes, this might be a transient state
+        // (e.g., newly unblocked tasks not yet picked up by br ready)
+        if (actionableTasks.length > 0) {
+          this.emit({
+            type: 'engine:warning',
+            timestamp: new Date().toISOString(),
+            code: 'transient_no_tasks',
+            message: `No ready tasks found but ${actionableTasks.length} open task(s) exist. Retrying...`,
+          });
+          // Wait before retrying (use iteration delay or default 5s)
+          const waitMs = this.config.iterationDelay > 0 ? this.config.iterationDelay : 5000;
           await this.delay(waitMs);
           // Refresh and try again
           await this.refreshTasks();

@@ -361,6 +361,11 @@ export class BeadsRustBvTrackerPlugin extends BaseTrackerPlugin {
                 if (statusFilter && !statusFilter.includes(fullTask.status)) {
                     return this.delegateGetNextTaskFiltered(filter, statusFilter);
                 }
+                // Filter out epics - they can't be claimed/processed
+                if (fullTask.type === 'epic') {
+                    console.warn('bv --robot-next returned an epic, falling back to delegate');
+                    return this.delegateGetNextTaskFiltered(filter, statusFilter);
+                }
                 // Augment and return.
                 fullTask.metadata = {
                     ...fullTask.metadata,
@@ -379,6 +384,11 @@ export class BeadsRustBvTrackerPlugin extends BaseTrackerPlugin {
             const fullTask = await this.delegate.getTask(nextOutput.id);
             if (fullTask) {
                 if (statusFilter && !statusFilter.includes(fullTask.status)) {
+                    return this.delegateGetNextTaskFiltered(filter, statusFilter);
+                }
+                // Filter out epics - they can't be claimed/processed
+                if (fullTask.type === 'epic') {
+                    console.warn('bv --robot-next returned an epic, falling back to delegate');
                     return this.delegateGetNextTaskFiltered(filter, statusFilter);
                 }
                 fullTask.metadata = {
