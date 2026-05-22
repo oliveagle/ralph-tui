@@ -786,12 +786,12 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
     status: TrackerTaskStatus
   ): Promise<TrackerTask | undefined> {
     const brStatus = mapStatusToBr(status);
-    const args = ['update', id, '--status', brStatus];
+    const args = ['update', id, '--status', brStatus, '--force'];
 
     const { exitCode, stderr } = await execBr(args, this.workingDir);
 
     if (exitCode !== 0) {
-      console.error(`br update ${id} --status ${brStatus} failed:`, stderr);
+      console.error(`br update ${id} --status ${brStatus} --force failed:`, stderr);
       return undefined;
     }
 
