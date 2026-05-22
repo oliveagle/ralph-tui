@@ -94,6 +94,8 @@ import {
 import { initializeTheme } from '../tui/theme.js';
 import type { ConnectionToastMessage } from '../tui/components/Toast.js';
 import { spawnSync } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
 import { basename, join } from 'node:path';
 import { getEnvExclusionReport, formatEnvExclusionReport } from '../plugins/agents/base.js';
 import { writeFileAtomic } from '../session/atomic-write.js';
@@ -4276,35 +4278,63 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         let parallelExecutionPromise: Promise<void> | null = null;
         let progressTimer: ReturnType<typeof setInterval> | null = null;
 
+        // Create log file for parallel headless execution
+        const logDir = join(config.cwd, '.ralph-tui');
+        let logFile: string | null = null;
+        let logStream: import('node:fs').WriteStream | null = null;
+        try {
+          await mkdir(logDir, { recursive: true });
+          const now = new Date();
+          const dateStr = now.toISOString().replace(/[:.]/g, '-');
+          logFile = join(logDir, `parallel-${session.id}-${dateStr}.log`);
+          logStream = createWriteStream(logFile, { flags: 'a' });
+          // Log initial message
+          const initMsg = `[${now.toLocaleTimeString()}] [INFO] [parallel] Parallel execution log started for session ${session.id}\n`;
+          process.stdout.write(initMsg);
+          logStream.write(initMsg);
+        } catch (err) {
+          // Best effort - continue without log file
+          const warnMsg = `[WARN] Could not create log file: ${err instanceof Error ? err.message : String(err)}\n`;
+          process.stdout.write(warnMsg);
+        }
+
+        // Helper to write to both console and log file
+        const writeLog = (line: string) => {
+          process.stdout.write(line);
+          if (logStream) {
+            logStream.write(line);
+          }
+        };
+
         parallelExecutor.on((event) => {
           const time = new Date(event.timestamp).toLocaleTimeString();
           switch (event.type) {
             case 'parallel:started':
-              console.log(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers`);
+              writeLog(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers\n`);
               break;
             case 'parallel:session-branch-created':
-              console.log(`[${time}] [INFO] [parallel] Session branch created: ${event.sessionBranch} (from ${event.originalBranch})`);
+              writeLog(`[${time}] [INFO] [parallel] Session branch created: ${event.sessionBranch} (from ${event.originalBranch})\n`);
               break;
             case 'parallel:group-started':
-              console.log(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers`);
+              writeLog(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers\n`);
               break;
             case 'worker:started':
-              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} started: ${event.task.title}`);
+              writeLog(`[${time}] [INFO] [worker] Worker ${event.workerId} started: ${event.task.title}\n`);
               // Mark task as active in persisted session state
               persistedState = addActiveTask(persistedState, event.task.id);
               savePersistedSession(persistedState).catch(() => {});
               break;
             case 'worker:progress':
-              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} iteration ${event.currentIteration}/${event.maxIterations}`);
+              writeLog(`[${time}] [INFO] [worker] Worker ${event.workerId} iteration ${event.currentIteration}/${event.maxIterations}\n`);
               break;
             case 'worker:completed':
-              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}`);
+              writeLog(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}\n`);
               // Remove task from active list in persisted session state
               persistedState = removeActiveTask(persistedState, event.result.task.id);
               savePersistedSession(persistedState).catch(() => {});
               break;
             case 'worker:failed':
-              console.log(`[${time}] [ERROR] [worker] Worker ${event.workerId} failed: ${event.error}`);
+              writeLog(`[${time}] [ERROR] [worker] Worker ${event.workerId} failed: ${event.error}\n`);
               // Remove task from active list in persisted session state
               persistedState = removeActiveTask(persistedState, event.task.id);
               savePersistedSession(persistedState).catch(() => {});
@@ -4313,26 +4343,26 @@ export async function executeRunCommand(args: string[]): Promise<void> {
               if (event.stream === 'stdout') {
                 const lines = event.data.split('\n').filter((l: string) => l.trim());
                 for (const line of lines.slice(-3)) {
-                  console.log(`[${time}] [OUTPUT] [${event.workerId}] ${line}`);
+                  writeLog(`[${time}] [OUTPUT] [${event.workerId}] ${line}\n`);
                 }
               } else if (event.stream === 'stderr') {
                 const lines = event.data.split('\n').filter((l: string) => l.trim());
                 for (const line of lines.slice(-3)) {
-                  console.log(`[${time}] [STDERR] [${event.workerId}] ${line}`);
+                  writeLog(`[${time}] [STDERR] [${event.workerId}] ${line}\n`);
                 }
               }
               break;
             case 'merge:completed':
-              console.log(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)`);
+              writeLog(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)\n`);
               break;
             case 'merge:failed':
-              console.log(`[${time}] [ERROR] [merge] Merge failed: ${event.error}`);
+              writeLog(`[${time}] [ERROR] [merge] Merge failed: ${event.error}\n`);
               break;
             case 'parallel:completed':
-              console.log(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms`);
+              writeLog(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms\n`);
               break;
             case 'parallel:failed':
-              console.log(`[${time}] [ERROR] [parallel] Parallel execution failed: ${event.error}`);
+              writeLog(`[${time}] [ERROR] [parallel] Parallel execution failed: ${event.error}\n`);
               break;
           }
         });
@@ -4343,7 +4373,8 @@ export async function executeRunCommand(args: string[]): Promise<void> {
             return;
           }
           parallelSignalInterrupted = true;
-          console.log('\n[INFO] [parallel] Received signal, stopping parallel execution...');
+          const time = new Date().toLocaleTimeString();
+          writeLog(`\n[${time}] [INFO] [parallel] Received signal, stopping parallel execution...\n`);
 
           // Clear progress timer
           if (progressTimer) {
@@ -4362,7 +4393,8 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           // Reset any in_progress tasks back to open
           const activeTasks = getActiveTasks(persistedState);
           if (activeTasks.length > 0) {
-            console.log(`[INFO] [parallel] Resetting ${activeTasks.length} in_progress task(s) to open...`);
+            const time = new Date().toLocaleTimeString();
+            writeLog(`[${time}] [INFO] [parallel] Resetting ${activeTasks.length} in_progress task(s) to open...\n`);
             for (const taskId of activeTasks) {
               try {
                 await tracker.updateTaskStatus(taskId, 'open');
@@ -4404,9 +4436,9 @@ export async function executeRunCommand(args: string[]): Promise<void> {
                   ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
                   : `${elapsed}s`;
 
-              console.log(
-                `[PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${state.totalTasksCompleted}/${state.totalTasks}`
-              );
+              const time = new Date().toLocaleTimeString();
+              const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${state.totalTasksCompleted}/${state.totalTasks}\n`;
+              writeLog(progressLine);
             }).catch(() => {
               // Best effort — don't let progress timer fail
             });
@@ -4427,6 +4459,13 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           // Remove handlers after execution completes
           process.removeListener('SIGINT', handleParallelSignal);
           process.removeListener('SIGTERM', handleParallelSignal);
+          // Close log file if open
+          if (logStream) {
+            logStream.end();
+            if (logFile) {
+              console.log(`Parallel execution log saved to: ${logFile}`);
+            }
+          }
         }
       }
 

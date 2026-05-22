@@ -343,6 +343,12 @@ export interface ParallelExecutorConfig {
 
   /** Selected execution scopes for multi-epic runs */
   scopes?: ExecutionScope[];
+
+  /**
+   * Optional log file path for headless parallel execution.
+   * When provided, progress events will be appended to this file.
+   */
+  logFile?: string;
 }
 
 /**
