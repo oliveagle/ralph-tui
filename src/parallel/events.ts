@@ -212,10 +212,11 @@ export interface ParallelSessionBranchCreatedEvent extends EngineEventBase {
 /** Emitted when a parallel group begins execution. */
 export interface ParallelGroupStartedEvent extends EngineEventBase {
   type: 'parallel:group-started';
-  group: ParallelGroup;
+  group: ParallelGroup | null;  // null for continuous fetch mode
   groupIndex: number;
   totalGroups: number;
   workerCount: number;
+  isContinuousFetch?: boolean;  // true if this event is from continuous task fetching
 }
 
 /** Emitted when a parallel group finishes (all workers done + merged). */

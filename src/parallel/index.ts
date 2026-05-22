@@ -349,6 +349,61 @@ export class ParallelExecutor {
         await this.executeGroup(group, i);
       }
 
+      // Continuous mode: after completing all initial tasks, keep fetching and processing new tasks.
+      // Workers are continuously restarted to pick up newly available tasks.
+      while (!this.shouldStop) {
+        await this.waitWhilePaused();
+        if (this.shouldStop) break;
+
+        // Check if there are new tasks available
+        const newTasks = await this.tracker.getTasks({
+          status: ['open', 'in_progress'],
+        });
+
+        if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+          const filteredIdSet = new Set(this.config.filteredTaskIds);
+          newTasks.filter((t) => filteredIdSet.has(t.id));
+        }
+
+        const actionableTasks = newTasks.filter((t) => t.type !== 'epic');
+        if (actionableTasks.length === 0) {
+          // No new tasks, break out of continuous mode
+          break;
+        }
+
+        // Analyze task graph for new tasks
+        const newTaskGraph = analyzeTaskGraph(actionableTasks);
+        if (!shouldRunParallel(newTaskGraph)) {
+          // No parallel work available
+          break;
+        }
+
+        this.taskGraph = newTaskGraph;
+        this.currentGroupIndex = 0;
+
+        this.emitParallel({
+          type: 'parallel:group-started',
+          timestamp: new Date().toISOString(),
+          group: null,
+          groupIndex: -1,
+          totalGroups: this.taskGraph.groups.length,
+          workerCount: this.config.maxWorkers,
+          isContinuousFetch: true,
+        });
+
+        // Execute all groups again
+        for (let i = 0; i < this.taskGraph.groups.length; i++) {
+          if (this.shouldStop) break;
+          await this.waitWhilePaused();
+          if (this.shouldStop) break;
+
+          this.currentGroupIndex = i;
+          const group = this.taskGraph.groups[i];
+
+          await this.executeGroup(group, i);
+        }
+      }
+
       const allActionableTasksCompleted =
         this.totalTasksCompleted >= this.taskGraph.actionableTaskCount &&
         this.totalTasksFailed === 0;

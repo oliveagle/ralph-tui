@@ -3908,6 +3908,24 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   try {
     await engine.initialize(undefined, { tracker });
 
+    // In auto-loop mode, reset ALL in_progress tasks to open
+    // Reason: only one raloop + parallel instance should run per project
+    // Any in_progress tasks at startup indicate incorrect state
+    if (options.autoLoop) {
+      const allTasks = await tracker.getTasks({ status: ['in_progress'] });
+      if (allTasks.length > 0) {
+        console.log(`[raloop] Resetting ${allTasks.length} in_progress task(s) to open...`);
+        for (const task of allTasks) {
+          try {
+            await tracker.updateTaskStatus(task.id, 'open');
+          } catch {
+            // Continue on individual failures
+          }
+        }
+        console.log(`[raloop] Reset complete.`);
+      }
+    }
+
     // Detect and handle stale in_progress tasks from crashed sessions
     // This must happen before we fetch tasks, so they reflect any resets
     await detectAndHandleStaleTasks(config.cwd, tracker, options.headless ?? false);
