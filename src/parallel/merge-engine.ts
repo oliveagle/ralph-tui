@@ -485,12 +485,8 @@ export class MergeEngine {
       operation.conflictedFiles = conflictedFiles;
       this.updateStatus(operation, 'conflicted');
 
-      // Abort the merge for now — conflict resolver handles this separately
-      this.git(['merge', '--abort']);
-
-      // Rollback to backup tag. Avoid `git clean -fd` so untracked project files
-      // (for example tasks/prd.json) are never removed.
-      this.git(['reset', '--hard', operation.backupTag]);
+      // DO NOT abort or rollback - keep conflicted state for ConflictResolver
+      // The resolver will extract conflict data and resolve it
 
       this.emit({
         type: 'conflict:detected',

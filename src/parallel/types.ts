@@ -284,7 +284,7 @@ export interface ConflictResolutionResult {
   success: boolean;
 
   /** How the conflict was resolved */
-  method: 'ai' | 'manual' | 'ours' | 'theirs';
+  method: 'ai' | 'auto' | 'manual' | 'ours' | 'theirs';
 
   /** The resolved content (written to the file) */
   resolvedContent?: string;
@@ -349,6 +349,12 @@ export interface ParallelExecutorConfig {
    * When provided, progress events will be appended to this file.
    */
   logFile?: string;
+
+  /**
+   * When enabled, executor will poll for new tasks instead of exiting when empty.
+   * Used for raloop auto-restart mode to keep workers alive while waiting.
+   */
+  autoPoll?: boolean;
 }
 
 /**
@@ -390,6 +396,9 @@ export interface ParallelExecutorState {
 
   /** Active workers and their display states */
   workers: WorkerDisplayState[];
+
+  /** Configured maximum number of parallel workers */
+  maxWorkers: number;
 
   /** Results from workers that have completed during this execution */
   workerResults?: WorkerResult[];

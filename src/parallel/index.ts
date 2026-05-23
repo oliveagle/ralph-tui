@@ -23,6 +23,7 @@ import type {
   WorktreeInfo,
   WorkerDisplayState,
   WorkerResult,
+  MergeResult,
 } from './types.js';
 import type {
   ParallelEvent,
@@ -579,6 +580,119 @@ export class ParallelExecutor {
   }
 
   /**
+   * Process a single merge operation and return the result.
+   * This is a one-shot function that processes exactly one merge and exits.
+   * Use this to spawn a fresh coordinator for each merge, preventing
+   * long-running instability.
+   *
+   * @param workerResult - Result from a completed worker
+   * @returns Merge result, or null if the merge should be skipped
+   */
+  async runSingleMerge(workerResult: WorkerResult): Promise<{
+    success: boolean;
+    hadConflicts: boolean;
+    mergeResult?: MergeResult;
+  }> {
+    // Check if merge should be attempted
+    const shouldMerge = workerResult.success &&
+      (workerResult.taskCompleted || workerResult.commitCount > 0);
+
+    if (!shouldMerge) {
+      const skipReason = !workerResult.success
+        ? `worker failed: ${workerResult.error ?? 'unknown error'}`
+        : workerResult.commitCount === 0
+          ? 'no commits made (files may be in .gitignore)'
+          : 'unexpected state';
+
+      console.warn(`[parallel] Skipping merge for task ${workerResult.task.id}: ${skipReason}`);
+      return { success: false, hadConflicts: false };
+    }
+
+    // Save tracker state before merge
+    const savedState = await this.saveTrackerState();
+
+    try {
+      // Enqueue and process the merge
+      this.mergeEngine.enqueue(workerResult);
+      const mergeResult = await this.mergeEngine.processNext();
+
+      if (!mergeResult) {
+        return { success: false, hadConflicts: false };
+      }
+
+      if (mergeResult.success) {
+        // Merge succeeded - complete the task
+        try {
+          console.log(`[parallel] Completing task ${workerResult.task.id} after merge success`);
+          const completeResult = await this.tracker.completeTask(workerResult.task.id);
+          console.log(`[parallel] completeTask result for ${workerResult.task.id}: success=${completeResult.success}, message=${completeResult.message}`);
+          if (!completeResult.success) {
+            console.error(`[parallel] Failed to complete task ${workerResult.task.id}: ${completeResult.message}`);
+          }
+        } catch (err) {
+          console.error(`[parallel] Exception completing task ${workerResult.task.id}:`, err);
+        }
+        // Merge worker's progress.md into main
+        await this.mergeProgressFile(workerResult);
+        this.totalMergesCompleted++;
+        return { success: true, hadConflicts: false, mergeResult };
+      }
+
+      if (mergeResult.hadConflicts) {
+        // Conflict resolution will be handled separately
+        return { success: false, hadConflicts: true, mergeResult };
+      }
+
+      // Merge failed (non-conflict)
+      return { success: false, hadConflicts: false, mergeResult };
+    } finally {
+      // Always restore tracker state
+      await this.restoreTrackerState(savedState);
+    }
+  }
+
+  /**
+   * Resolve a single merge conflict operation.
+   * This is a one-shot function that resolves exactly one conflict and exits.
+   *
+   * @param operation - The merge operation with conflicts
+   * @param workerResult - The worker result that produced the merge
+   * @returns True if resolution succeeded, false otherwise
+   */
+  async runSingleConflictResolution(
+    operation: MergeOperation,
+    workerResult: WorkerResult
+  ): Promise<boolean> {
+    // Save tracker state before conflict resolution
+    const savedState = await this.saveTrackerState();
+
+    try {
+      const resolutions = await this.conflictResolver.resolveConflicts(operation);
+      const allResolved = resolutions.every((r) => r.success);
+
+      if (allResolved) {
+        // Conflict resolution succeeded - complete the task
+        try {
+          await this.tracker.completeTask(workerResult.task.id);
+        } catch {
+          // Log but don't fail after successful resolution
+        }
+        // Merge worker's progress.md into main
+        await this.mergeProgressFile(workerResult);
+        this.totalConflictsResolved += resolutions.length;
+        this.totalMergesCompleted++;
+        return true;
+      }
+
+      // Conflict resolution failed
+      return false;
+    } finally {
+      // Always restore tracker state
+      await this.restoreTrackerState(savedState);
+    }
+  }
+
+  /**
    * Execute a single parallel group.
    */
   private async executeGroup(
@@ -635,66 +749,29 @@ export class ParallelExecutor {
           continue;
         }
 
-        // Attempt merge if worker succeeded AND either:
-        // 1. Agent explicitly completed the task (COMPLETE signal), OR
-        // 2. Worker made commits (work has value even without COMPLETE)
-        // This prevents losing work when agents exit without COMPLETE but have commits.
-        const shouldMerge = result.success && (result.taskCompleted || result.commitCount > 0);
+        // Each merge is handled via runSingleMerge — a one-shot function that
+        // processes exactly one merge and exits. This prevents long-running
+        // instability by ensuring each merge is an isolated operation.
+        const mergeOutcome = await this.runSingleMerge(result);
 
-        if (shouldMerge) {
-          // Save tracker state before merge to prevent worktree's stale copy from overwriting
-          const savedState = await this.saveTrackerState();
+        if (mergeOutcome.success) {
+          // Merge succeeded via runSingleMerge
+          this.requeueCounts.delete(result.task.id);
+          groupTasksCompleted++;
+          this.totalTasksCompleted++;
+          groupMergesCompleted++;
+        } else if (mergeOutcome.hadConflicts && mergeOutcome.mergeResult !== undefined) {
+          // Conflict detected — collect for one-shot resolution
+          const mergeResult = mergeOutcome.mergeResult; // narrow the type
+          const operation = this.mergeEngine
+            .getQueue()
+            .find((op) => op.id === mergeResult.operationId);
 
-          // Enqueue and process merge (wrapped in try/finally to guarantee restore)
-          let mergeResult: Awaited<ReturnType<typeof this.mergeEngine.processNext>>;
-          this.mergeEngine.enqueue(result);
-          try {
-            mergeResult = await this.mergeEngine.processNext();
-          } finally {
-            // Restore tracker state after merge to preserve task completion status
-            await this.restoreTrackerState(savedState);
-          }
-
-          if (mergeResult?.success) {
-            // Merge succeeded - mark task as complete in tracker
-            // Note: This happens AFTER restoreTrackerState to ensure we don't overwrite completion
-            try {
-              const completeResult = await this.tracker.completeTask(result.task.id);
-              if (!completeResult.success) {
-                console.error(`[parallel] Failed to complete task ${result.task.id}: ${completeResult.message}`);
-              }
-            } catch (err) {
-              console.error(`[parallel] Exception completing task ${result.task.id}:`, err);
-            }
-            // Merge worker's progress.md into main so subsequent workers see learnings
-            await this.mergeProgressFile(result);
-            this.requeueCounts.delete(result.task.id);
-            groupTasksCompleted++;
-            this.totalTasksCompleted++;
-            groupMergesCompleted++;
-            this.totalMergesCompleted++;
-          } else if (mergeResult?.hadConflicts) {
-            // Collect conflict for later resolution (don't resolve yet)
-            const operation = this.mergeEngine
-              .getQueue()
-              .find((op) => op.id === mergeResult.operationId);
-
-            if (operation && this.config.aiConflictResolution) {
-              pendingConflicts.push({ operation, workerResult: result });
-            } else {
-              // AI conflict resolution disabled - requeue/fail based on retry budget.
-              const requeued = await this.handleMergeFailure(result, operation);
-              if (requeued) {
-                retryTasks.push(result.task);
-              } else {
-                groupTasksFailed++;
-                this.totalTasksFailed++;
-                groupMergesFailed++;
-              }
-            }
-          } else {
-            // Merge failed (non-conflict) - requeue/fail based on retry budget.
-            const requeued = await this.handleMergeFailure(result);
+          if (operation && this.config.aiConflictResolution) {
+            pendingConflicts.push({ operation, workerResult: result });
+          } else if (operation) {
+            // AI conflict resolution disabled - requeue/fail based on retry budget.
+            const requeued = await this.handleMergeFailure(result, operation);
             if (requeued) {
               retryTasks.push(result.task);
             } else {
@@ -704,17 +781,15 @@ export class ParallelExecutor {
             }
           }
         } else {
-          // Worker failed or has no work to merge
-          const skipReason = !result.success
-            ? `worker failed: ${result.error ?? 'unknown error'}`
-            : result.commitCount === 0
-              ? 'no commits made (files may be in .gitignore)'
-              : `unexpected state: success=${result.success}, taskCompleted=${result.taskCompleted}, commits=${result.commitCount}`;
-
-          console.warn(`[parallel] Skipping merge for task ${result.task.id}: ${skipReason}`);
-          groupTasksFailed++;
-          this.totalTasksFailed++;
-          await this.resetTaskToOpen(result.task.id);
+          // Merge failed or skipped (non-conflict) - requeue/fail based on retry budget.
+          const requeued = await this.handleMergeFailure(result);
+          if (requeued) {
+            retryTasks.push(result.task);
+          } else {
+            groupTasksFailed++;
+            this.totalTasksFailed++;
+            groupMergesFailed++;
+          }
         }
       }
 
@@ -747,35 +822,14 @@ export class ParallelExecutor {
             continue;
           }
 
-          // Save tracker state before conflict resolution
-          const savedState = await this.saveTrackerState();
+          // Resolve conflicts using one-shot handler (exits after resolution)
+          const resolutionSucceeded = await this.runSingleConflictResolution(operation, workerResult);
 
-          // Resolve conflicts (wrapped in try/finally to guarantee restore)
-          let resolutions: Awaited<ReturnType<typeof this.conflictResolver.resolveConflicts>>;
-          let allResolved: boolean;
-          try {
-            resolutions = await this.conflictResolver.resolveConflicts(operation);
-            allResolved = resolutions.every((r) => r.success);
-          } finally {
-            // Restore tracker state after conflict resolution
-            await this.restoreTrackerState(savedState);
-          }
-
-          if (allResolved) {
-            // Conflict resolution succeeded - mark task as complete
-            try {
-              await this.tracker.completeTask(workerResult.task.id);
-            } catch {
-              // Log but don't fail after successful resolution
-            }
-            // Merge worker's progress.md into main
-            await this.mergeProgressFile(workerResult);
+          if (resolutionSucceeded) {
             this.requeueCounts.delete(workerResult.task.id);
-            this.totalConflictsResolved += resolutions.length;
             groupTasksCompleted++;
             this.totalTasksCompleted++;
             groupMergesCompleted++;
-            this.totalMergesCompleted++;
           } else {
             // Conflict resolution failed - requeue first, then track as pending only
             // if retries are exhausted so the conflict queue reflects actionable items.

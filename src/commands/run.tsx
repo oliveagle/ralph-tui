@@ -4216,6 +4216,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         sessionBranchName: targetBranch,
         filteredTaskIds,
         scopes: executionScopes,
+        autoPoll: options.autoLoop,
       });
 
       // Wire up AI conflict resolution if enabled (default: true)
@@ -4277,7 +4278,6 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         let parallelSignalInterrupted = false;
         let parallelExecutionPromise: Promise<void> | null = null;
         let progressTimer: ReturnType<typeof setInterval> | null = null;
-        let deadlockRestartAttempted = false;
         const logDir = join(config.cwd, '.ralph-tui');
         let logFile: string | null = null;
         let logStream: import('node:fs').WriteStream | null = null;
@@ -4451,7 +4451,6 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         // eslint-disable-next-line no-constant-condition
         while (true) {
           // Reset for new execution
-          deadlockRestartAttempted = false;
           parallelExecutor.reset();
 
           try {
@@ -4479,36 +4478,33 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
                 const time = new Date().toLocaleTimeString();
 
-                // Deadlock detection:
-                // 1. No running workers but there are still tasks to do (workers died/stuck)
-                // 2. Good progress made (>50% of total tasks completed) - restart to pick up fresh state
+                // Internal restart detection (only in autoLoop mode):
+                // 1. No running workers (deadlock or stalled execution)
+                // 2. Completed tasks exceed half of configured parallel workers
                 const totalTasks = state.totalTasks;
                 const completedCount = state.totalTasksCompleted;
                 const hasRunningWorkers = runningWorkers.length > 0;
                 const hasTasksRemaining = inProgress > 0 || open > 0;
-                const hasGoodProgress = totalTasks > 0 && completedCount > totalTasks / 2;
+                const maxParallel = state.maxWorkers;
+                const isDeadlocked = !hasRunningWorkers && hasTasksRemaining;
+                const halfParallel = Math.max(1, Math.floor(maxParallel / 2));
+                const exceededHalfParallel = completedCount > halfParallel;
+                const shouldRestart = isDeadlocked || exceededHalfParallel;
 
                 const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks}\n`;
                 writeLog(progressLine);
 
-                // Check for deadlock conditions (only in autoLoop mode and if not already restarting)
-                if (options.autoLoop && !deadlockRestartAttempted) {
-                  const isDeadlocked = !hasRunningWorkers && hasTasksRemaining;
-                  const shouldRestart = isDeadlocked || hasGoodProgress;
+                if (options.autoLoop && shouldRestart) {
+                  const reason = isDeadlocked
+                    ? 'Deadlock detected: no running workers but tasks remain'
+                    : `Completed ${completedCount}/${totalTasks} tasks exceeds parallel/2 threshold (${completedCount} > ${halfParallel})`;
+                  writeLog(`[${time}] [INFO] [parallel] ${reason} - initiating internal restart\n`);
 
-                  if (shouldRestart) {
-                    deadlockRestartAttempted = true;
-                    const reason = isDeadlocked
-                      ? 'Deadlock detected: no running workers but tasks remain'
-                      : `Good progress achieved: ${completedCount}/${totalTasks} tasks completed (${Math.round((completedCount / totalTasks) * 100)}%)`;
-                    writeLog(`[${time}] [INFO] [parallel] ${reason} - initiating internal restart\n`);
-
-                    // Stop and restart parallel execution
-                    prepareParallelRestart(reason).then(() => {
-                      // Break out of the execution promise wait
-                      parallelExecutor.stop();
-                    });
-                  }
+                  // Stop and restart parallel execution
+                  prepareParallelRestart(reason).then(() => {
+                    // Break out of the execution promise wait
+                    parallelExecutor.stop();
+                  });
                 }
               }).catch(() => {
                 // Best effort — don't let progress timer fail

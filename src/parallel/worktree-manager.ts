@@ -144,8 +144,8 @@ export class WorktreeManager {
       sanitizedTaskId,
     ].filter((segment): segment is string => Boolean(segment));
     const branchName = branchSegments.join('/');
-    // worktreeDir is now an absolute path (sibling of project), so just join
-    const worktreePath = path.join(this.config.worktreeDir, worktreeId);
+    // One worktree per task (task-level directory), never reuse folders
+    const worktreePath = path.join(this.config.worktreeDir, sanitizedTaskId);
 
     // Ensure parent directory exists
     await this.ensureWorktreeDir();
@@ -158,6 +158,10 @@ export class WorktreeManager {
 
     // Copy ralph-tui config into the worktree so the agent has project context
     await this.copyConfig(worktreePath);
+
+    // Exclude .beads/ from git tracking in this worktree to prevent merge conflicts
+    // The main repo may track .beads/, but worktree modifications should not be committed
+    await this.excludeBeadsFromWorktree(worktreePath);
 
     const info: WorktreeInfo = {
       id: worktreeId,
@@ -416,6 +420,49 @@ export class WorktreeManager {
         fs.mkdirSync(targetDir, { recursive: true });
         fs.copyFileSync(yamlConfig, path.join(targetDir, `config.${ext}`));
       }
+    }
+  }
+
+  /**
+   * Exclude .beads/ from git tracking in this worktree.
+   * This prevents merge conflicts when workers modify beads state via br close/sync.
+   * The main repo may track .beads/, but worktree modifications should not be committed.
+   */
+  private async excludeBeadsFromWorktree(worktreePath: string): Promise<void> {
+    // For worktrees, .git is a file pointing to the main repo.
+    // The info/exclude file must be created in the linked git directory.
+    let gitDir: string;
+    const gitFile = path.join(worktreePath, '.git');
+
+    if (fs.existsSync(gitFile) && fs.statSync(gitFile).isFile()) {
+      // .git is a file - read the path to the actual git directory
+      const content = fs.readFileSync(gitFile, 'utf-8').trim();
+      // Format: "gitdir: /path/to/repo/.git/worktrees/..." or "gitdir: ../.git"
+      const match = content.match(/^gitdir:\s*(.+)$/m);
+      if (!match) return;
+      gitDir = match[1]!.trim();
+      if (!path.isAbsolute(gitDir)) {
+        gitDir = path.resolve(worktreePath, gitDir);
+      }
+    } else {
+      // .git is a directory (main repo or bare repo)
+      gitDir = gitFile;
+    }
+
+    const excludePath = path.join(gitDir, 'info', 'exclude');
+    let excludeContent = '';
+
+    if (fs.existsSync(excludePath)) {
+      excludeContent = fs.readFileSync(excludePath, 'utf-8');
+    }
+
+    if (!excludeContent.includes('.beads/')) {
+      if (excludeContent && !excludeContent.endsWith('\n')) {
+        excludeContent += '\n';
+      }
+      excludeContent += '.beads/\n';
+      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+      fs.writeFileSync(excludePath, excludeContent, 'utf-8');
     }
   }
 

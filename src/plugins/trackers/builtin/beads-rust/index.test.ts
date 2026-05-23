@@ -1189,47 +1189,41 @@ describe('BeadsRustTrackerPlugin', () => {
 
   describe('completeTask', () => {
     test('executes br close <id> without --force', async () => {
-      mockSpawnResponses = [{ exitCode: 0, stdout: 'br version 0.4.1\n' }];
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br close
+        { exitCode: 0 },
+        // autoCloseParentsIfChildrenComplete -> getTasks -> br list
+        { exitCode: 0, stdout: JSON.stringify([]) },
+        // getTask -> br show
+        { exitCode: 0, stdout: JSON.stringify([{ id: 't1', title: 'Task 1', status: 'closed', priority: 2 }]) },
+      ];
 
       const plugin = new BeadsRustTrackerPlugin();
       await plugin.initialize({ workingDir: '/test' });
-
       mockSpawnArgs = [];
-      mockSpawnResponses = [
-        { exitCode: 0 },
-        {
-          exitCode: 0,
-          stdout: JSON.stringify([
-            { id: 't1', title: 'Task 1', status: 'closed', priority: 2 },
-          ]),
-        },
-      ];
 
       const result = await plugin.completeTask('t1');
 
       expect(result.success).toBe(true);
       expect(result.task?.status).toBe('completed');
-      expect(mockSpawnArgs.length).toBe(2);
+      expect(mockSpawnArgs.length).toBe(3);
       expect(mockSpawnArgs[0]?.args).toEqual(['close', 't1']);
-      expect(mockSpawnArgs[1]?.args).toEqual(['show', 't1', '--json']);
+      expect(mockSpawnArgs[2]?.args).toEqual(['show', 't1', '--json']);
     });
 
     test('supports --reason', async () => {
-      mockSpawnResponses = [{ exitCode: 0, stdout: 'br version 0.4.1\n' }];
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br close
+        { exitCode: 0 },
+        // autoCloseParentsIfChildrenComplete -> getTasks -> br list
+        { exitCode: 0, stdout: JSON.stringify([]) },
+      ];
 
       const plugin = new BeadsRustTrackerPlugin();
       await plugin.initialize({ workingDir: '/test' });
-
       mockSpawnArgs = [];
-      mockSpawnResponses = [
-        { exitCode: 0 },
-        {
-          exitCode: 0,
-          stdout: JSON.stringify([
-            { id: 't1', title: 'Task 1', status: 'closed', priority: 2 },
-          ]),
-        },
-      ];
 
       await plugin.completeTask('t1', 'shipped');
 
@@ -1237,13 +1231,15 @@ describe('BeadsRustTrackerPlugin', () => {
     });
 
     test('returns failure result when br close fails', async () => {
-      mockSpawnResponses = [{ exitCode: 0, stdout: 'br version 0.4.1\n' }];
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br close fails
+        { exitCode: 1, stderr: 'permission denied' },
+      ];
 
       const plugin = new BeadsRustTrackerPlugin();
       await plugin.initialize({ workingDir: '/test' });
-
       mockSpawnArgs = [];
-      mockSpawnResponses = [{ exitCode: 1, stderr: 'permission denied' }];
 
       const result = await plugin.completeTask('t1');
 
@@ -1255,15 +1251,12 @@ describe('BeadsRustTrackerPlugin', () => {
   });
 
   describe('updateTaskStatus', () => {
-    test('executes br update <id> --status <status> and returns updated task', async () => {
-      mockSpawnResponses = [{ exitCode: 0, stdout: 'br version 0.4.1\n' }];
-
-      const plugin = new BeadsRustTrackerPlugin();
-      await plugin.initialize({ workingDir: '/test' });
-
-      mockSpawnArgs = [];
+    test('executes br update <id> --status <status> --force and returns updated task', async () => {
       mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br update
         { exitCode: 0 },
+        // getTask -> br show
         {
           exitCode: 0,
           stdout: JSON.stringify([
@@ -1271,6 +1264,10 @@ describe('BeadsRustTrackerPlugin', () => {
           ]),
         },
       ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
 
       const task = await plugin.updateTaskStatus('t1', 'in_progress');
 
@@ -1281,19 +1278,17 @@ describe('BeadsRustTrackerPlugin', () => {
         't1',
         '--status',
         'in_progress',
+        '--force',
       ]);
       expect(mockSpawnArgs[1]?.args).toEqual(['show', 't1', '--json']);
     });
 
     test('maps completed to br closed', async () => {
-      mockSpawnResponses = [{ exitCode: 0, stdout: 'br version 0.4.1\n' }];
-
-      const plugin = new BeadsRustTrackerPlugin();
-      await plugin.initialize({ workingDir: '/test' });
-
-      mockSpawnArgs = [];
       mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br update
         { exitCode: 0 },
+        // getTask -> br show
         {
           exitCode: 0,
           stdout: JSON.stringify([
@@ -1302,20 +1297,26 @@ describe('BeadsRustTrackerPlugin', () => {
         },
       ];
 
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
       const task = await plugin.updateTaskStatus('t1', 'completed');
 
-      expect(mockSpawnArgs[0]?.args).toEqual(['update', 't1', '--status', 'closed']);
+      expect(mockSpawnArgs[0]?.args).toEqual(['update', 't1', '--status', 'closed', '--force']);
       expect(task?.status).toBe('completed');
     });
 
     test('returns undefined when br update fails', async () => {
-      mockSpawnResponses = [{ exitCode: 0, stdout: 'br version 0.4.1\n' }];
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // br update fails
+        { exitCode: 1, stderr: 'permission denied' },
+      ];
 
       const plugin = new BeadsRustTrackerPlugin();
       await plugin.initialize({ workingDir: '/test' });
-
       mockSpawnArgs = [];
-      mockSpawnResponses = [{ exitCode: 1, stderr: 'permission denied' }];
 
       const task = await plugin.updateTaskStatus('t1', 'in_progress');
 
@@ -1326,6 +1327,7 @@ describe('BeadsRustTrackerPlugin', () => {
         't1',
         '--status',
         'in_progress',
+        '--force',
       ]);
     });
   });
@@ -1369,13 +1371,15 @@ describe('BeadsRustTrackerPlugin', () => {
   });
 
   describe('getTemplate', () => {
-    test('returns a br-specific template with br close and br sync --flush-only', () => {
+    test('returns a template with task details and workflow steps', () => {
       const plugin = new BeadsRustTrackerPlugin();
       const template = plugin.getTemplate();
 
-      expect(template).toContain('br close');
-      expect(template).toContain('br sync --flush-only');
-      expect(template).not.toContain('bd close');
+      expect(template).toContain('Bead Details');
+      expect(template).toContain('taskId');
+      expect(template).toContain('taskTitle');
+      expect(template).toContain('Workflow');
+      expect(template).toContain('typecheck');
     });
   });
 

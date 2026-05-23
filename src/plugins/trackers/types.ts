@@ -15,6 +15,7 @@ export type TaskPriority = 0 | 1 | 2 | 3 | 4;
 export type TrackerTaskStatus =
   | 'open'
   | 'in_progress'
+  | 'merging'
   | 'blocked'
   | 'waiting'
   | 'completed'

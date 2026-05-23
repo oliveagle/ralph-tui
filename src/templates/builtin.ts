@@ -287,10 +287,8 @@ export const BEADS_RUST_TEMPLATE = `{{!-- Full PRD for project context (agent st
 {{else}}
 5. Do NOT create git commits. Leave all changes uncommitted for manual review.
 {{/if}}
-6. Close the bead: \`br close {{taskId}} --reason "Brief description"\`
-7. Flush tracker state to JSONL (no git side effects): \`br sync --flush-only\`
-8. Document learnings (see below)
-9. Signal completion
+6. Document learnings (see below)
+7. Signal completion
 
 ## Before Completing
 APPEND to \`.ralph-tui/progress.md\`:
@@ -386,10 +384,8 @@ Completing this task will unblock: {{blocks}}
 {{else}}
 5. Do NOT create git commits. Leave all changes uncommitted for manual review.
 {{/if}}
-6. Close the bead: \`br close {{taskId}} --reason "Brief description"\`
-7. Flush tracker state to JSONL (no git side effects): \`br sync --flush-only\`
-8. Document learnings (see below)
-9. Signal completion
+6. Document learnings (see below)
+7. Signal completion
 
 ## Before Completing
 APPEND to \`.ralph-tui/progress.md\`:

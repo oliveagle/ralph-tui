@@ -143,6 +143,7 @@ function mapStatus(brStatus: string): TrackerTaskStatus {
   const statusMap: Record<string, TrackerTaskStatus> = {
     open: 'open',
     in_progress: 'in_progress',
+    merging: 'merging',
     closed: 'completed',
     cancelled: 'cancelled',
     waiting: 'waiting',
@@ -189,6 +190,7 @@ function mapStatusToBr(status: TrackerTaskStatus): string {
   const statusMap: Record<TrackerTaskStatus, string> = {
     open: 'open',
     in_progress: 'in_progress',
+    merging: 'merging',
     completed: 'closed',
     cancelled: 'cancelled',
     waiting: 'waiting',

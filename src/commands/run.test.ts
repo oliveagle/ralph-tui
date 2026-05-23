@@ -517,6 +517,7 @@ describe('parallel summary helpers', () => {
       currentGroupIndex: 0,
       totalGroups: 1,
       workers: [],
+      maxWorkers: 3,
       workerResults: [],
       mergeQueue: [],
       completedMerges: [],
