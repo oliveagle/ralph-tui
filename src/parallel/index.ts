@@ -292,9 +292,33 @@ export class ParallelExecutor {
       // Filter out epics - they cannot be claimed/processed by workers
       tasks = tasks.filter((t) => t.type !== 'epic');
 
+      // Auto-poll mode: wait for tasks instead of exiting immediately
       if (tasks.length === 0) {
-        this.status = 'completed';
-        return;
+        if (this.config.autoPoll) {
+          this.emitParallel({
+            type: 'parallel:group-started',
+            timestamp: new Date().toISOString(),
+            group: null,
+            groupIndex: -1,
+            totalGroups: 0,
+            workerCount: this.config.maxWorkers,
+            isContinuousFetch: true,
+          });
+          await this.pollForTasks();
+          tasks = await this.tracker.getTasks({
+            status: ['open', 'in_progress'],
+          });
+          if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+            const filteredIdSet = new Set(this.config.filteredTaskIds);
+            tasks = tasks.filter((t) => filteredIdSet.has(t.id));
+          }
+          tasks = tasks.filter((t) => t.type !== 'epic');
+        }
+
+        if (tasks.length === 0) {
+          this.status = 'completed';
+          return;
+        }
       }
 
       // Analyze task graph
@@ -502,6 +526,7 @@ export class ParallelExecutor {
       currentGroupIndex: this.currentGroupIndex,
       totalGroups: this.taskGraph?.groups.length ?? 0,
       workers: this.activeWorkers.map((w) => w.getDisplayState()),
+      maxWorkers: this.config.maxWorkers,
       workerResults: [...this.completedResults],
       mergeQueue: [...this.mergeEngine.getQueue()],
       completedMerges: [],
@@ -610,7 +635,13 @@ export class ParallelExecutor {
           continue;
         }
 
-        if (result.success && result.taskCompleted) {
+        // Attempt merge if worker succeeded AND either:
+        // 1. Agent explicitly completed the task (COMPLETE signal), OR
+        // 2. Worker made commits (work has value even without COMPLETE)
+        // This prevents losing work when agents exit without COMPLETE but have commits.
+        const shouldMerge = result.success && (result.taskCompleted || result.commitCount > 0);
+
+        if (shouldMerge) {
           // Save tracker state before merge to prevent worktree's stale copy from overwriting
           const savedState = await this.saveTrackerState();
 
@@ -673,6 +704,14 @@ export class ParallelExecutor {
             }
           }
         } else {
+          // Worker failed or has no work to merge
+          const skipReason = !result.success
+            ? `worker failed: ${result.error ?? 'unknown error'}`
+            : result.commitCount === 0
+              ? 'no commits made (files may be in .gitignore)'
+              : `unexpected state: success=${result.success}, taskCompleted=${result.taskCompleted}, commits=${result.commitCount}`;
+
+          console.warn(`[parallel] Skipping merge for task ${result.task.id}: ${skipReason}`);
           groupTasksFailed++;
           this.totalTasksFailed++;
           await this.resetTaskToOpen(result.task.id);
@@ -1097,6 +1136,38 @@ export class ParallelExecutor {
     }
 
     return preserveBranches;
+  }
+
+  /**
+   * Poll for new tasks in auto-poll mode.
+   * Keeps checking for tasks until some are available or stop is requested.
+   */
+  private async pollForTasks(): Promise<void> {
+    const POLL_INTERVAL_MS = 5000; // Check every 5 seconds
+
+    while (!this.shouldStop) {
+      await this.waitWhilePaused();
+      if (this.shouldStop) break;
+
+      const newTasks = await this.tracker.getTasks({
+        status: ['open', 'in_progress'],
+      });
+
+      let filteredTasks = newTasks;
+      if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+        const filteredIdSet = new Set(this.config.filteredTaskIds);
+        filteredTasks = newTasks.filter((t) => filteredIdSet.has(t.id));
+      }
+
+      const actionableTasks = filteredTasks.filter((t) => t.type !== 'epic');
+      if (actionableTasks.length > 0) {
+        // Tasks available - return to start processing
+        return;
+      }
+
+      // No tasks - wait before next poll
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
   }
 
   /**

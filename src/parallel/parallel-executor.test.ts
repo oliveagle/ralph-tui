@@ -612,6 +612,82 @@ describe('ParallelExecutor class', () => {
       expect((executor as any).totalTasksFailed).toBe(1);
     });
 
+    test('executeGroup merges workers with commits even without COMPLETE signal', async () => {
+      const tracker = createMockTracker();
+      const completedTaskIds: string[] = [];
+      tracker.completeTask = async (taskId) => {
+        completedTaskIds.push(taskId);
+        return { success: true, message: 'Task completed' };
+      };
+
+      const executor = new ParallelExecutor(createMockConfig(), tracker, {
+        maxRequeueCount: 1,
+      });
+      const taskA = task('A');
+      const group = { index: 0, tasks: [taskA], depth: 0 };
+      const events: ParallelEvent[] = [];
+      executor.on((event) => events.push(event));
+
+      (executor as any).taskGraph = createSingleGroupAnalysis(taskA);
+      (executor as any).batchTasks = () => [[taskA]];
+      (executor as any).executeBatch = async () => [
+        // Worker has commits but no COMPLETE signal (taskCompleted: false)
+        createWorkerResult(taskA, { success: true, taskCompleted: false, commitCount: 3 }),
+      ];
+      (executor as any).mergeEngine = {
+        enqueue: () => {},
+        getQueue: () => [],
+        processNext: async () => ({
+          operationId: 'op-1',
+          success: true,
+          strategy: 'fast-forward',
+          hadConflicts: false,
+          filesChanged: 3,
+          durationMs: 1,
+        }),
+      };
+
+      await (executor as any).executeGroup(group, 0);
+
+      // Worker with commits should be merged even without COMPLETE signal
+      const completedEvent = events.find((e) => e.type === 'parallel:group-completed');
+      expect(completedEvent?.type).toBe('parallel:group-completed');
+      if (completedEvent?.type === 'parallel:group-completed') {
+        expect(completedEvent.tasksCompleted).toBe(1);
+        expect(completedEvent.tasksFailed).toBe(0);
+        expect(completedEvent.mergesCompleted).toBe(1);
+      }
+      expect(completedTaskIds).toContain('A');
+    });
+
+    test('executeGroup skips merge for worker with no commits and no COMPLETE', async () => {
+      const tracker = createMockTracker();
+      const statusUpdates: Array<{ taskId: string; status: string }> = [];
+      tracker.updateTaskStatus = async (taskId, status) => {
+        statusUpdates.push({ taskId, status });
+        return undefined;
+      };
+
+      const executor = new ParallelExecutor(createMockConfig(), tracker, {
+        maxRequeueCount: 1,
+      });
+      const taskA = task('A');
+      const group = { index: 0, tasks: [taskA], depth: 0 };
+
+      (executor as any).taskGraph = createSingleGroupAnalysis(taskA);
+      (executor as any).batchTasks = () => [[taskA]];
+      (executor as any).executeBatch = async () => [
+        // Worker made no commits and no COMPLETE signal
+        createWorkerResult(taskA, { success: true, taskCompleted: false, commitCount: 0 }),
+      ];
+
+      await (executor as any).executeGroup(group, 0);
+
+      expect(statusUpdates).toContainEqual({ taskId: 'A', status: 'open' });
+      expect((executor as any).totalTasksFailed).toBe(1);
+      expect((executor as any).totalTasksCompleted).toBe(0);
+    });
+
     test('executeGroup counts merge failure as failed task (not completed)', async () => {
       const tracker = createMockTracker();
       const statusUpdates: Array<{ taskId: string; status: string }> = [];
