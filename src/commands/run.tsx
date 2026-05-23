@@ -80,6 +80,7 @@ import { sendCompletionNotification, sendMaxIterationsNotification, sendErrorNot
 import type { NotificationSoundMode } from '../config/types.js';
 import { detectSandboxMode } from '../sandbox/index.js';
 import type { SandboxMode } from '../sandbox/index.js';
+import { logColors, stripColors } from '../utils/colors.js';
 import {
   createRemoteServer,
   getOrCreateServerToken,
@@ -4297,11 +4298,13 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           process.stdout.write(warnMsg);
         }
 
-        // Helper to write to both console and log file
+        // Helper to write to both console (colored) and log file (plain)
         const writeLog = (line: string) => {
+          // Write colored to console
           process.stdout.write(line);
           if (logStream) {
-            logStream.write(line);
+            // Write plain (no colors) to log file
+            logStream.write(stripColors(line));
           }
         };
 
@@ -4309,31 +4312,31 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           const time = new Date(event.timestamp).toLocaleTimeString();
           switch (event.type) {
             case 'parallel:started':
-              writeLog(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers\n`);
+              writeLog(logColors.info(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers\n`));
               break;
             case 'parallel:session-branch-created':
-              writeLog(`[${time}] [INFO] [parallel] Session branch created: ${event.sessionBranch} (from ${event.originalBranch})\n`);
+              writeLog(logColors.info(`[${time}] [INFO] [parallel] Session branch created: ${event.sessionBranch} (from ${event.originalBranch})\n`));
               break;
             case 'parallel:group-started':
-              writeLog(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers\n`);
+              writeLog(logColors.info(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers\n`));
               break;
             case 'worker:started':
-              writeLog(`[${time}] [INFO] [worker] Worker ${event.workerId} started: ${event.task.title}\n`);
+              writeLog(logColors.worker(`[${time}] [INFO] [worker] Worker ${event.workerId} started: ${event.task.title}\n`));
               // Mark task as active in persisted session state
               persistedState = addActiveTask(persistedState, event.task.id);
               savePersistedSession(persistedState).catch(() => {});
               break;
             case 'worker:progress':
-              writeLog(`[${time}] [INFO] [worker] Worker ${event.workerId} iteration ${event.currentIteration}/${event.maxIterations}\n`);
+              writeLog(logColors.worker(`[${time}] [INFO] [worker] Worker ${event.workerId} iteration ${event.currentIteration}/${event.maxIterations}\n`));
               break;
             case 'worker:completed':
-              writeLog(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}\n`);
+              writeLog(logColors.success(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}\n`));
               // Remove task from active list in persisted session state
               persistedState = removeActiveTask(persistedState, event.result.task.id);
               savePersistedSession(persistedState).catch(() => {});
               break;
             case 'worker:failed':
-              writeLog(`[${time}] [ERROR] [worker] Worker ${event.workerId} failed: ${event.error}\n`);
+              writeLog(logColors.error(`[${time}] [ERROR] [worker] Worker ${event.workerId} failed: ${event.error}\n`));
               // Remove task from active list in persisted session state
               persistedState = removeActiveTask(persistedState, event.task.id);
               savePersistedSession(persistedState).catch(() => {});
@@ -4347,30 +4350,34 @@ export async function executeRunCommand(args: string[]): Promise<void> {
               } else if (event.stream === 'stderr') {
                 const lines = event.data.split('\n').filter((l: string) => l.trim());
                 for (const line of lines.slice(-3)) {
-                  writeLog(`[${time}] [STDERR] [${event.workerId}] ${line}\n`);
+                  writeLog(logColors.warn(`[${time}] [STDERR] [${event.workerId}] ${line}\n`));
                 }
               }
               break;
             case 'merge:completed':
-              writeLog(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)\n`);
+              writeLog(logColors.merge(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)\n`));
               break;
             case 'merge:failed':
-              writeLog(`[${time}] [ERROR] [merge] Merge failed: ${event.error}\n`);
+              writeLog(logColors.error(`[${time}] [ERROR] [merge] Merge failed: ${event.error}\n`));
               break;
             case 'parallel:completed':
-              writeLog(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms\n`);
+              writeLog(logColors.success(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms\n`));
               break;
             case 'parallel:failed':
-              writeLog(`[${time}] [ERROR] [parallel] Parallel execution failed: ${event.error}\n`);
+              writeLog(logColors.error(`[${time}] [ERROR] [parallel] Parallel execution failed: ${event.error}\n`));
               break;
           }
         });
 
+        // Signal for restart tracking
+        let restartNeeded = false;
+
         // Helper to stop parallel execution and reset state for restart
         const prepareParallelRestart = async (reason: string): Promise<void> => {
+          restartNeeded = true;
           const time = new Date().toLocaleTimeString();
-          writeLog(`\n[${time}] [WARN] [parallel] ${reason}\n`);
-          writeLog(`[${time}] [INFO] [parallel] Preparing for restart...\n`);
+          writeLog(logColors.warn(`\n[${time}] [WARN] [parallel] ${reason}\n`));
+          writeLog(logColors.info(`[${time}] [INFO] [parallel] Preparing for restart...\n`));
 
           // Clear progress timer
           if (progressTimer) {
@@ -4479,31 +4486,29 @@ export async function executeRunCommand(args: string[]): Promise<void> {
                 const time = new Date().toLocaleTimeString();
 
                 // Internal restart detection (only in autoLoop mode):
-                // 1. No running workers (deadlock or stalled execution)
-                // 2. Completed tasks exceed half of configured parallel workers
+                // Only restart on deadlock - no running workers but tasks remain
+                // IMPORTANT: Never restart if there are active merge operations
+                // (including conflict resolution in Phase 2) - this was the bug
                 const totalTasks = state.totalTasks;
                 const completedCount = state.totalTasksCompleted;
                 const hasRunningWorkers = runningWorkers.length > 0;
                 const hasTasksRemaining = inProgress > 0 || open > 0;
-                const maxParallel = state.maxWorkers;
-                const isDeadlocked = !hasRunningWorkers && hasTasksRemaining;
-                const halfParallel = Math.max(1, Math.floor(maxParallel / 2));
-                const exceededHalfParallel = completedCount > halfParallel;
-                const shouldRestart = isDeadlocked || exceededHalfParallel;
+                const hasActiveMerges = state.hasActiveMerges ?? false;
+                const isDeadlocked = !hasRunningWorkers && hasTasksRemaining && !hasActiveMerges;
+                const shouldRestart = isDeadlocked;
 
-                const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks}\n`;
+                const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks} | merges=${hasActiveMerges ? 'active' : 'idle'}\n`;
                 writeLog(progressLine);
 
                 if (options.autoLoop && shouldRestart) {
                   const reason = isDeadlocked
-                    ? 'Deadlock detected: no running workers but tasks remain'
-                    : `Completed ${completedCount}/${totalTasks} tasks exceeds parallel/2 threshold (${completedCount} > ${halfParallel})`;
-                  writeLog(`[${time}] [INFO] [parallel] ${reason} - initiating internal restart\n`);
+                    ? `Deadlock detected: no running workers but tasks remain (merges: ${hasActiveMerges ? 'active' : 'idle'}, status: ${state.status})`
+                    : `Internal restart triggered`;
+                  writeLog(`[${time}] [INFO] [parallel] ${reason}\n`);
 
                   // Stop and restart parallel execution
-                  prepareParallelRestart(reason).then(() => {
-                    // Break out of the execution promise wait
-                    parallelExecutor.stop();
+                  prepareParallelRestart(reason).catch(() => {
+                    // Best effort - don't let restart handling fail
                   });
                 }
               }).catch(() => {
@@ -4512,7 +4517,40 @@ export async function executeRunCommand(args: string[]): Promise<void> {
             }, 5000);
 
             await parallelExecutionPromise;
-            // Execution completed normally - exit the loop
+
+            // If a restart was triggered, don't exit - loop back for a fresh execution
+            if (restartNeeded) {
+              restartNeeded = false;
+              // Remove old signal handlers so they get re-registered in the next iteration
+              process.removeListener('SIGINT', handleParallelSignal);
+              process.removeListener('SIGTERM', handleParallelSignal);
+              continue;
+            }
+
+            // In auto-loop mode, check for remaining tasks before exiting
+            if (options.autoLoop) {
+              const remainingTasks = await tracker.getTasks({ status: ['open', 'in_progress'] });
+              if (remainingTasks.length > 0) {
+                writeLog(`[${new Date().toLocaleTimeString()}] [INFO] [parallel] Execution completed but ${remainingTasks.length} task(s) remain, restarting...\n`);
+                parallelExecutor.reset();
+                await new Promise((resolve) => setTimeout(resolve, 3000));
+                // Remove old signal handlers so they get re-registered in the next iteration
+                process.removeListener('SIGINT', handleParallelSignal);
+                process.removeListener('SIGTERM', handleParallelSignal);
+                continue;
+              }
+
+              // In auto-loop mode, no tasks remain but keep waiting for new tasks
+              writeLog(`[${new Date().toLocaleTimeString()}] [INFO] [parallel] No tasks remaining. Waiting for new tasks (Ctrl+C to stop)...\n`);
+              parallelExecutor.reset();
+              await new Promise((resolve) => setTimeout(resolve, 5000));
+              // Remove old signal handlers so they get re-registered in the next iteration
+              process.removeListener('SIGINT', handleParallelSignal);
+              process.removeListener('SIGTERM', handleParallelSignal);
+              continue;
+            }
+
+            // Execution completed normally and no tasks remain - exit the loop
             break;
           } catch (error) {
             const time = new Date().toLocaleTimeString();

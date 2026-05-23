@@ -426,6 +426,9 @@ export interface ParallelExecutorState {
 
   /** Selected execution scopes for this run */
   scopes?: ExecutionScope[];
+
+  /** Whether there are active merge operations (merging or resolving conflicts) */
+  hasActiveMerges?: boolean;
 }
 
 // ─── Session Persistence Types ─────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import type {
   WorkerDisplayState,
   WorkerResult,
   MergeResult,
+  FileConflict,
 } from './types.js';
 import type {
   ParallelEvent,
@@ -326,9 +327,42 @@ export class ParallelExecutor {
       this.taskGraph = analyzeTaskGraph(tasks);
 
       if (!shouldRunParallel(this.taskGraph)) {
-        // Fall back — this shouldn't happen if the caller checked first
-        this.status = 'completed';
-        return;
+        // In auto-poll mode, wait for more tasks instead of exiting immediately
+        if (this.config.autoPoll) {
+          this.emitParallel({
+            type: 'parallel:group-started',
+            timestamp: new Date().toISOString(),
+            group: null,
+            groupIndex: -1,
+            totalGroups: 0,
+            workerCount: this.config.maxWorkers,
+            isContinuousFetch: true,
+          });
+          await this.pollForTasks();
+          // After polling, re-fetch and re-analyze tasks
+          tasks = await this.tracker.getTasks({
+            status: ['open', 'in_progress'],
+          });
+          if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+            const filteredIdSet = new Set(this.config.filteredTaskIds);
+            tasks = tasks.filter((t) => filteredIdSet.has(t.id));
+          }
+          tasks = tasks.filter((t) => t.type !== 'epic');
+          if (tasks.length === 0) {
+            this.status = 'completed';
+            return;
+          }
+          this.taskGraph = analyzeTaskGraph(tasks);
+          // If still not enough tasks for parallel, exit
+          if (!shouldRunParallel(this.taskGraph)) {
+            this.status = 'completed';
+            return;
+          }
+        } else {
+          // Fall back — this shouldn't happen if the caller checked first
+          this.status = 'completed';
+          return;
+        }
       }
 
       // Initialize session branch unless directMerge is enabled.
@@ -392,18 +426,53 @@ export class ParallelExecutor {
 
         const actionableTasks = newTasks.filter((t) => t.type !== 'epic');
         if (actionableTasks.length === 0) {
-          // No new tasks, break out of continuous mode
-          break;
-        }
+          if (this.config.autoPoll) {
+            // Auto-loop mode: wait for tasks instead of exiting
+            this.emitParallel({
+              type: 'parallel:group-started',
+              timestamp: new Date().toISOString(),
+              group: null,
+              groupIndex: -1,
+              totalGroups: 0,
+              workerCount: this.config.maxWorkers,
+              isContinuousFetch: true,
+            });
+            await this.pollForTasks();
+            // Re-fetch tasks after polling
+            const postPollTasks = await this.tracker.getTasks({
+              status: ['open', 'in_progress'],
+            });
+            let filtered = postPollTasks;
+            if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+              const filteredIdSet = new Set(this.config.filteredTaskIds);
+              filtered = postPollTasks.filter((t) => filteredIdSet.has(t.id));
+            }
+            const postPollActionable = filtered.filter((t) => t.type !== 'epic');
+            if (postPollActionable.length === 0) {
+              // Still no tasks after polling, exit continuous mode
+              break;
+            }
+            // Continue to analyze and process the new tasks
+            const newTaskGraph = analyzeTaskGraph(postPollActionable);
+            if (!shouldRunParallel(newTaskGraph)) {
+              // Not enough tasks for parallel, exit continuous mode
+              break;
+            }
+            this.taskGraph = newTaskGraph;
+          } else {
+            // No new tasks, break out of continuous mode
+            break;
+          }
+        } else {
+          // Analyze task graph for new tasks
+          const newTaskGraph = analyzeTaskGraph(actionableTasks);
+          if (!shouldRunParallel(newTaskGraph)) {
+            // No parallel work available
+            break;
+          }
 
-        // Analyze task graph for new tasks
-        const newTaskGraph = analyzeTaskGraph(actionableTasks);
-        if (!shouldRunParallel(newTaskGraph)) {
-          // No parallel work available
-          break;
+          this.taskGraph = newTaskGraph;
         }
-
-        this.taskGraph = newTaskGraph;
         this.currentGroupIndex = 0;
 
         this.emitParallel({
@@ -521,6 +590,12 @@ export class ParallelExecutor {
    * Get the current executor state for TUI rendering.
    */
   getState(): ParallelExecutorState {
+    // Get merge queue to detect active merge operations
+    const mergeQueue = this.mergeEngine.getQueue();
+    const hasActiveMerges = mergeQueue.some(op =>
+      op.status === 'queued' || op.status === 'in-progress' || op.status === 'conflicted'
+    );
+
     return {
       status: this.status,
       taskGraph: this.taskGraph,
@@ -529,9 +604,17 @@ export class ParallelExecutor {
       workers: this.activeWorkers.map((w) => w.getDisplayState()),
       maxWorkers: this.config.maxWorkers,
       workerResults: [...this.completedResults],
-      mergeQueue: [...this.mergeEngine.getQueue()],
+      mergeQueue: [...mergeQueue],
       completedMerges: [],
-      activeConflicts: [],
+      activeConflicts: mergeQueue
+        .filter(op => op.status === 'conflicted' && (op.conflictedFiles?.length ?? 0) > 0)
+        .flatMap(op => (op.conflictedFiles ?? []).map((filePath): FileConflict => ({
+          filePath,
+          oursContent: '',
+          theirsContent: '',
+          baseContent: '',
+          conflictMarkers: '',
+        }))),
       totalTasksCompleted: this.totalTasksCompleted,
       totalTasks: this.taskGraph?.actionableTaskCount ?? 0,
       startedAt: this.startedAt,
@@ -539,6 +622,7 @@ export class ParallelExecutor {
         ? Date.now() - new Date(this.startedAt).getTime()
         : 0,
       scopes: this.config.scopes,
+      hasActiveMerges,
     };
   }
 

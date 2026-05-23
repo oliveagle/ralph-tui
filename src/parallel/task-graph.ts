@@ -195,28 +195,12 @@ export function recommendParallelism(
  * Internal heuristic evaluation for parallel recommendation.
  */
 function shouldRunParallelInternal(
-  groups: ParallelGroup[],
-  totalTasks: number,
-  cyclicCount: number
+  _groups: ParallelGroup[],
+  _totalTasks: number,
+  _cyclicCount: number
 ): boolean {
-  const actionableCount = totalTasks - cyclicCount;
-
-  // Need at least 3 actionable tasks (overhead not worth it for fewer)
-  if (actionableCount < 3) {
-    return false;
-  }
-
-  // Must not have more than 50% cyclic tasks
-  if (totalTasks > 0 && cyclicCount / totalTasks > 0.5) {
-    return false;
-  }
-
-  // Need at least one group with ≥2 tasks (actual parallelism)
-  const hasParallelGroup = groups.some((g) => g.tasks.length >= 2);
-  if (!hasParallelGroup) {
-    return false;
-  }
-
+  // Always run in parallel mode (auto-loop will wait for tasks if none exist)
+  // This allows raloop to keep running and poll for new tasks
   return true;
 }
 

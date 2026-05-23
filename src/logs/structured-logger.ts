@@ -4,6 +4,8 @@
  * Used by the --no-tui / --headless mode for machine-parseable output.
  */
 
+import { logColors } from '../utils/colors.js';
+
 /**
  * Log levels supported by the structured logger.
  */
@@ -32,6 +34,9 @@ export interface StructuredLoggerConfig {
 
   /** Use ISO8601 format for timestamps (default: false, uses HH:mm:ss) */
   isoTimestamp?: boolean;
+
+  /** Enable colored output (default: true if TTY, false otherwise) */
+  colors?: boolean;
 
   /** Stream to write logs to (default: process.stdout) */
   stream?: NodeJS.WritableStream;
@@ -73,10 +78,13 @@ export class StructuredLogger {
   private config: Required<StructuredLoggerConfig>;
 
   constructor(config: StructuredLoggerConfig = {}) {
+    const isTTY = process.stdout.isTTY;
+
     this.config = {
       minLevel: config.minLevel ?? 'INFO',
       showTimestamp: config.showTimestamp ?? true,
       isoTimestamp: config.isoTimestamp ?? false,
+      colors: config.colors ?? isTTY ?? true,
       stream: config.stream ?? process.stdout,
       errorStream: config.errorStream ?? process.stderr,
     };
@@ -90,6 +98,34 @@ export class StructuredLogger {
   }
 
   /**
+   * Colorize the level tag based on log level.
+   */
+  private colorizeLevel(level: LogLevel): string {
+    if (!this.config.colors) {
+      return `[${level}]`;
+    }
+
+    let colored: string;
+    switch (level) {
+      case 'ERROR':
+        colored = logColors.error(level);
+        break;
+      case 'WARN':
+        colored = logColors.warn(level);
+        break;
+      case 'INFO':
+        colored = logColors.info(level);
+        break;
+      case 'DEBUG':
+        colored = logColors.debug(level);
+        break;
+      default:
+        colored = level;
+    }
+    return `[${colored}]`;
+  }
+
+  /**
    * Build the log prefix: [timestamp] [level] [component]
    */
   private buildPrefix(level: LogLevel, component: LogComponent): string {
@@ -100,7 +136,7 @@ export class StructuredLogger {
       parts.push(`[${timestamp}]`);
     }
 
-    parts.push(`[${level}]`);
+    parts.push(this.colorizeLevel(level));
     parts.push(`[${component}]`);
 
     return parts.join(' ');
