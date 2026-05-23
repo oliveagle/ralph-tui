@@ -4358,7 +4358,9 @@ export async function executeRunCommand(args: string[]): Promise<void> {
               writeLog(logColors.merge(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)\n`));
               break;
             case 'merge:failed':
-              writeLog(logColors.error(`[${time}] [ERROR] [merge] Merge failed: ${event.error}\n`));
+              const taskInfo = event.taskTitle ? ` [${event.taskTitle}]` : '';
+              const workerInfo = event.workerId ? ` [${event.workerId}]` : '';
+              writeLog(logColors.error(`[${time}] [ERROR] [merge] Merge failed${taskInfo}${workerInfo}: ${event.error}\n`));
               break;
             case 'parallel:completed':
               writeLog(logColors.success(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms\n`));

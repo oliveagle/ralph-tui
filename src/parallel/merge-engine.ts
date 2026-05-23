@@ -519,6 +519,9 @@ export class MergeEngine {
         timestamp: new Date().toISOString(),
         operationId: operation.id,
         taskId,
+        taskTitle: operation.workerResult.task.title,
+        workerId: operation.workerResult.workerId,
+        worktreePath: operation.workerResult.worktreePath,
         error: result.error!,
       });
 
@@ -571,6 +574,9 @@ export class MergeEngine {
       timestamp: operation.completedAt,
       result,
       taskId: operation.workerResult.task.id,
+      taskTitle: operation.workerResult.task.title,
+      workerId: operation.workerResult.workerId,
+      worktreePath: operation.workerResult.worktreePath,
     });
 
     return result;
@@ -603,6 +609,9 @@ export class MergeEngine {
       timestamp: operation.completedAt,
       operationId: operation.id,
       taskId: operation.workerResult.task.id,
+      taskTitle: operation.workerResult.task.title,
+      workerId: operation.workerResult.workerId,
+      worktreePath: operation.workerResult.worktreePath,
       error,
     });
 

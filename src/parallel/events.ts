@@ -120,6 +120,9 @@ export interface MergeCompletedEvent extends EngineEventBase {
   type: 'merge:completed';
   result: MergeResult;
   taskId: string;
+  taskTitle?: string;
+  workerId?: string;
+  worktreePath?: string;
 }
 
 /** Emitted when a merge fails (non-conflict error). */
@@ -127,6 +130,9 @@ export interface MergeFailedEvent extends EngineEventBase {
   type: 'merge:failed';
   operationId: string;
   taskId: string;
+  taskTitle?: string;
+  workerId?: string;
+  worktreePath?: string;
   error: string;
 }
 
@@ -135,6 +141,9 @@ export interface MergeRolledBackEvent extends EngineEventBase {
   type: 'merge:rolled-back';
   operationId: string;
   taskId: string;
+  taskTitle?: string;
+  workerId?: string;
+  worktreePath?: string;
   backupTag: string;
   reason: string;
 }
