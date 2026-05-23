@@ -159,6 +159,13 @@ export class WorktreeManager {
     // Copy ralph-tui config into the worktree so the agent has project context
     await this.copyConfig(worktreePath);
 
+    // Copy .beads/ database into the worktree so agents can query task metadata.
+    // The .beads/ directory is typically not tracked by git, so it won't be
+    // present in a fresh worktree checkout. Without it, `br show <id>` fails
+    // because the agent falls back to searching parent directories and finds
+    // the wrong database (e.g., a parent project's beads).
+    await this.copyBeadsDatabase(worktreePath);
+
     // Exclude .beads/ from git tracking in this worktree to prevent merge conflicts
     // The main repo may track .beads/, but worktree modifications should not be committed
     await this.excludeBeadsFromWorktree(worktreePath);
@@ -424,6 +431,37 @@ export class WorktreeManager {
   }
 
   /**
+   * Copy .beads/ database into a worktree so agents can query task metadata.
+   * The .beads/ directory is typically not tracked by git, so it won't be
+   * present in a fresh worktree checkout.
+   *
+   * This uses a recursive copy to preserve the full database structure
+   * (issues.jsonl, beads.db, etc.).
+   */
+  private async copyBeadsDatabase(worktreePath: string): Promise<void> {
+    const beadsSource = path.join(this.config.cwd, '.beads');
+    const beadsTarget = path.join(worktreePath, '.beads');
+
+    if (!fs.existsSync(beadsSource)) {
+      return;
+    }
+
+    fs.mkdirSync(beadsTarget, { recursive: true });
+
+    // Copy all files/directories from .beads/ to worktree's .beads/
+    const entries = fs.readdirSync(beadsSource);
+    for (const entry of entries) {
+      const srcPath = path.join(beadsSource, entry);
+      const targetPath = path.join(beadsTarget, entry);
+      if (fs.statSync(srcPath).isDirectory()) {
+        fs.cpSync(srcPath, targetPath, { recursive: true });
+      } else {
+        fs.copyFileSync(srcPath, targetPath);
+      }
+    }
+  }
+
+  /**
    * Exclude .beads/ from git tracking in this worktree.
    * This prevents merge conflicts when workers modify beads state via br close/sync.
    * The main repo may track .beads/, but worktree modifications should not be committed.
@@ -481,7 +519,7 @@ export class WorktreeManager {
       // 0/invalid values on filesystems like APFS.
       let available = await this.getAvailableDiskSpaceFromStatFs();
       if (available === null || available <= 0) {
-        available = await this.getAvailableDiskSpaceFromDf();
+        available = this.getAvailableDiskSpaceFromDf();
       }
 
       if (available === null) {

@@ -1629,4 +1629,359 @@ describe('BeadsRustTrackerPlugin', () => {
       ]);
     });
   });
+
+  describe('isTaskReady - dependency tracking', () => {
+    test('returns true for tasks with no dependencies', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('t1') -> br show t1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'No deps', status: 'open', priority: 2 },
+          ]),
+        },
+        // isTaskReady calls getTasks() -> br list
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'No deps', status: 'open', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('t1');
+
+      expect(isReady).toBe(true);
+    });
+
+    test('returns true when all dependencies are completed', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('t1') -> br show t1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task with deps', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2, dependency_type: 'blocks' },
+              { id: 'dep2', title: 'Dep 2', status: 'cancelled', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+        // isTaskReady calls getTasks() -> br list
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2 },
+            { id: 'dep2', title: 'Dep 2', status: 'cancelled', priority: 2 },
+            { id: 't1', title: 'Task with deps', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2, dependency_type: 'blocks' },
+              { id: 'dep2', title: 'Dep 2', status: 'cancelled', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('t1');
+
+      expect(isReady).toBe(true);
+    });
+
+    test('returns false when any dependency is still open', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('t1') -> br show t1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task with deps', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2, dependency_type: 'blocks' },
+              { id: 'dep2', title: 'Dep 2', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+        // isTaskReady calls getTasks() -> br list
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2 },
+            { id: 'dep2', title: 'Dep 2', status: 'open', priority: 2 },
+            { id: 't1', title: 'Task with deps', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2, dependency_type: 'blocks' },
+              { id: 'dep2', title: 'Dep 2', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('t1');
+
+      expect(isReady).toBe(false);
+    });
+
+    test('returns false when any dependency is in_progress', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('t1') -> br show t1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task with deps', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2, dependency_type: 'blocks' },
+              { id: 'dep2', title: 'Dep 2', status: 'in_progress', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+        // isTaskReady calls getTasks() -> br list
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2 },
+            { id: 'dep2', title: 'Dep 2', status: 'in_progress', priority: 2 },
+            { id: 't1', title: 'Task with deps', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'closed', priority: 2, dependency_type: 'blocks' },
+              { id: 'dep2', title: 'Dep 2', status: 'in_progress', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('t1');
+
+      expect(isReady).toBe(false);
+    });
+
+    test('returns false when task does not exist', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('nonexistent') -> br show (fails)
+        { exitCode: 1, stderr: 'not found' },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('nonexistent');
+
+      expect(isReady).toBe(false);
+    });
+
+    test('treats waiting status as resolved (task is ready)', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('t1') -> br show t1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task with waiting dep', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'waiting', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+        // isTaskReady calls getTasks() -> br list
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'dep1', title: 'Dep 1', status: 'waiting', priority: 2 },
+            { id: 't1', title: 'Task with waiting dep', status: 'open', priority: 2, dependencies: [
+              { id: 'dep1', title: 'Dep 1', status: 'waiting', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('t1');
+
+      expect(isReady).toBe(true);
+    });
+
+    test('handles missing dependency task gracefully (treats as resolved)', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        // isTaskReady calls getTask('t1') -> br show t1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task with missing dep', status: 'open', priority: 2, dependencies: [
+              { id: 'missing-dep', title: 'Missing', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+        // isTaskReady calls getTasks() -> br list (missing-dep is not returned)
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task with missing dep', status: 'open', priority: 2, dependencies: [
+              { id: 'missing-dep', title: 'Missing', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const isReady = await plugin.isTaskReady('t1');
+
+      // Missing dependencies are treated as resolved
+      expect(isReady).toBe(true);
+    });
+  });
+
+  describe('filterTasks with ready filter - dependency blocking', () => {
+    test('filters out tasks with unresolved dependencies when ready: true', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'ready-task', title: 'Ready Task', status: 'open', priority: 2 },
+            { id: 'blocked-task', title: 'Blocked Task', status: 'open', priority: 2, dependency_count: 1, dependencies: [
+              { id: 'open-dep', title: 'Open Dep', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+            { id: 'open-dep', title: 'Open Dep', status: 'open', priority: 2 },
+          ]),
+        },
+        // enrichDependencies for blocked-task (dependency_count=1)
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { issue_id: 'blocked-task', depends_on_id: 'open-dep', type: 'blocks', title: 'Open Dep', status: 'open', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const tasks = await plugin.getTasks({ ready: true });
+
+      // ready-task and open-dep have no dependencies, so both are ready
+      // blocked-task has an unresolved dependency, so it's filtered out
+      expect(tasks.length).toBe(2);
+      expect(tasks.map((t) => t.id).sort()).toEqual(['open-dep', 'ready-task']);
+      // Verify blocked-task is not in the results
+      expect(tasks.some((t) => t.id === 'blocked-task')).toBe(false);
+    });
+
+    test('includes tasks when all dependencies are completed when ready: true', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'task-with-completed-deps', title: 'Task with completed deps', status: 'open', priority: 2, dependency_count: 1, dependencies: [
+              { id: 'completed-dep', title: 'Completed Dep', status: 'closed', priority: 2, dependency_type: 'blocks' },
+            ]},
+            { id: 'completed-dep', title: 'Completed Dep', status: 'closed', priority: 2 },
+          ]),
+        },
+        // enrichDependencies for task-with-completed-deps (dependency_count=1)
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { issue_id: 'task-with-completed-deps', depends_on_id: 'completed-dep', type: 'blocks', title: 'Completed Dep', status: 'closed', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const tasks = await plugin.getTasks({ ready: true });
+
+      // Both tasks are ready: task-with-completed-deps has resolved deps, completed-dep has no deps
+      expect(tasks.length).toBe(2);
+      expect(tasks.map((t) => t.id).sort()).toEqual(['completed-dep', 'task-with-completed-deps']);
+    });
+
+    test('returns all tasks when ready filter is not specified', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'ready-task', title: 'Ready Task', status: 'open', priority: 2 },
+            { id: 'blocked-task', title: 'Blocked Task', status: 'open', priority: 2, dependency_count: 1, dependencies: [
+              { id: 'open-dep', title: 'Open Dep', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+            { id: 'open-dep', title: 'Open Dep', status: 'open', priority: 2 },
+          ]),
+        },
+        // enrichDependencies for blocked-task
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { issue_id: 'blocked-task', depends_on_id: 'open-dep', type: 'blocks', title: 'Open Dep', status: 'open', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const tasks = await plugin.getTasks();
+
+      expect(tasks.length).toBe(3);
+    });
+
+    test('combines ready filter with other filters correctly', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'ready-p1', title: 'Ready P1', status: 'open', priority: 1 },
+            { id: 'blocked-p1', title: 'Blocked P1', status: 'open', priority: 1, dependency_count: 1, dependencies: [
+              { id: 'open-dep', title: 'Open Dep', status: 'open', priority: 2, dependency_type: 'blocks' },
+            ]},
+            { id: 'ready-p2', title: 'Ready P2', status: 'open', priority: 2 },
+            { id: 'open-dep', title: 'Open Dep', status: 'open', priority: 2 },
+          ]),
+        },
+        // enrichDependencies for blocked-p1
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { issue_id: 'blocked-p1', depends_on_id: 'open-dep', type: 'blocks', title: 'Open Dep', status: 'open', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const tasks = await plugin.getTasks({ ready: true, priority: [1, 2] });
+
+      // ready-p1, ready-p2, and open-dep are all ready (blocked-p1 has unresolved dependency)
+      expect(tasks.length).toBe(3);
+      expect(tasks.map((t) => t.id).sort()).toEqual(['open-dep', 'ready-p1', 'ready-p2']);
+    });
+  });
 });
