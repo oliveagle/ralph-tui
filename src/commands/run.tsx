@@ -4354,13 +4354,22 @@ export async function executeRunCommand(args: string[]): Promise<void> {
                 }
               }
               break;
+            case 'merge:started':
+              writeLog(logColors.info(`[${time}] [INFO] [merge] Merge started: ${event.taskId || event.taskTitle || ''} on ${event.sourceBranch}\n`));
+              break;
             case 'merge:completed':
-              writeLog(logColors.merge(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)\n`));
+              const mergeTaskInfo = event.taskTitle ? event.taskTitle : event.taskId;
+              writeLog(logColors.merge(`[${time}] [INFO] [merge] Merge completed: ${mergeTaskInfo} (${event.result.strategy}, ${event.result.filesChanged} files)\n`));
               break;
             case 'merge:failed':
-              const taskInfo = event.taskTitle ? ` [${event.taskTitle}]` : '';
+              const failTaskInfo = event.taskTitle ? event.taskTitle : event.taskId;
               const workerInfo = event.workerId ? ` [${event.workerId}]` : '';
-              writeLog(logColors.error(`[${time}] [ERROR] [merge] Merge failed${taskInfo}${workerInfo}: ${event.error}\n`));
+              const worktreeInfo = event.worktreePath ? ` [${event.worktreePath}]` : '';
+              writeLog(logColors.error(`[${time}] [ERROR] [merge] Merge failed: ${failTaskInfo}${workerInfo}${worktreeInfo}: ${event.error}\n`));
+              break;
+            case 'merge:rolled-back':
+              const rollbackTaskInfo = event.taskTitle ? event.taskTitle : event.taskId;
+              writeLog(logColors.warn(`[${time}] [WARN] [merge] Merge rolled back: ${rollbackTaskInfo}: ${event.reason}\n`));
               break;
             case 'parallel:completed':
               writeLog(logColors.success(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms\n`));
@@ -4499,7 +4508,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
                 const isDeadlocked = !hasRunningWorkers && hasTasksRemaining && !hasActiveMerges;
                 const shouldRestart = isDeadlocked;
 
-                const progressLine = `[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks} | merges=${hasActiveMerges ? 'active' : 'idle'}\n`;
+                const progressLine = logColors.progress(`[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks} | merges=${hasActiveMerges ? 'active' : 'idle'}\n`);
                 writeLog(progressLine);
 
                 if (options.autoLoop && shouldRestart) {

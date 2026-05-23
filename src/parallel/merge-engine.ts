@@ -417,6 +417,9 @@ export class MergeEngine {
       operationId: operation.id,
       sourceBranch: operation.sourceBranch,
       taskId,
+      taskTitle: operation.workerResult.task.title,
+      workerId: operation.workerResult.workerId,
+      worktreePath: operation.workerResult.worktreePath,
     });
 
     // Pre-flight: verify branch has commits

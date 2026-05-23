@@ -113,6 +113,9 @@ export interface MergeStartedEvent extends EngineEventBase {
   operationId: string;
   sourceBranch: string;
   taskId: string;
+  taskTitle?: string;
+  workerId?: string;
+  worktreePath?: string;
 }
 
 /** Emitted when a merge completes successfully. */
