@@ -721,15 +721,20 @@ export class ParallelExecutor {
         // Merge worker's progress.md into main
         await this.mergeProgressFile(workerResult);
         this.totalMergesCompleted++;
+        // Cleanup worktree after successful merge
+        await this.worktreeManager.cleanupByBranch(workerResult.branchName);
         return { success: true, hadConflicts: false, mergeResult };
       }
 
       if (mergeResult.hadConflicts) {
         // Conflict resolution will be handled separately
+        // Note: worktree cleanup will happen after conflict resolution
         return { success: false, hadConflicts: true, mergeResult };
       }
 
       // Merge failed (non-conflict)
+      // Cleanup worktree even on merge failure
+      await this.worktreeManager.cleanupByBranch(workerResult.branchName);
       return { success: false, hadConflicts: false, mergeResult };
     } finally {
       // Always restore tracker state
@@ -767,10 +772,13 @@ export class ParallelExecutor {
         await this.mergeProgressFile(workerResult);
         this.totalConflictsResolved += resolutions.length;
         this.totalMergesCompleted++;
+        // Cleanup worktree after successful conflict resolution
+        await this.worktreeManager.cleanupByBranch(workerResult.branchName);
         return true;
       }
 
-      // Conflict resolution failed
+      // Conflict resolution failed - cleanup worktree
+      await this.worktreeManager.cleanupByBranch(workerResult.branchName);
       return false;
     } finally {
       // Always restore tracker state

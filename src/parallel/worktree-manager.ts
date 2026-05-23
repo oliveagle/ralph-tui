@@ -312,6 +312,43 @@ export class WorktreeManager {
   }
 
   /**
+   * Remove a worktree by branch name.
+   * This is called after a merge completes (success, failed, or rolled back).
+   * The worktree directory and its branch are removed, freeing up resources.
+   *
+   * @param branchName - The branch name of the worktree to remove
+   * @returns true if the worktree was found and removed, false otherwise
+   */
+  async cleanupByBranch(branchName: string): Promise<boolean> {
+    // Find the worktree info by branch name
+    let foundWorktreeId: string | null = null;
+    for (const [id, info] of this.worktrees.entries()) {
+      if (info.branch === branchName) {
+        foundWorktreeId = id;
+        break;
+      }
+    }
+
+    if (!foundWorktreeId) {
+      return false;
+    }
+
+    const info = this.worktrees.get(foundWorktreeId);
+    if (!info) {
+      return false;
+    }
+
+    try {
+      await this.removeWorktree(info);
+    } catch {
+      // Best effort cleanup
+    }
+
+    this.worktrees.delete(foundWorktreeId);
+    return true;
+  }
+
+  /**
    * Copy iteration logs from a worktree to the main project before cleanup.
    * This preserves logs so they can be viewed on session resume.
    */
