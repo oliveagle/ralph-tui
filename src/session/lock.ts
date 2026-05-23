@@ -287,7 +287,14 @@ export async function acquireLockWithPrompt(
   }
 
   // Lock exists and is held by a running process
-  if (lockStatus.isLocked && !force) {
+  if (lockStatus.isLocked) {
+    // Force mode with valid lock: override it
+    if (force) {
+      console.log(`Warning: Forcing lock acquisition (existing PID: ${lockStatus.lock.pid})`);
+      await deleteLockFile(cwd);
+      return tryWriteLockFile(cwd, sessionId);
+    }
+    // Normal mode: fail with error
     const pid = lockStatus.lock.pid;
     return {
       acquired: false,

@@ -250,6 +250,8 @@ export class MergeEngine {
 
     this.queue.push(operation);
 
+    console.log(`[merge] Enqueued: ${taskId} (${workerResult.branchName})`);
+
     this.emit({
       type: 'merge:queued',
       timestamp: now,
@@ -291,6 +293,13 @@ export class MergeEngine {
     }
 
     return results;
+  }
+
+  /**
+   * Clear the merge queue. Call this when resetting the executor for reuse.
+   */
+  clearQueue(): void {
+    this.queue.length = 0;
   }
 
   /**
@@ -411,6 +420,8 @@ export class MergeEngine {
     operation.startedAt = new Date().toISOString();
     this.updateStatus(operation, 'in-progress');
 
+    console.log(`[merge] Starting merge: ${taskId} (${operation.sourceBranch})`);
+
     this.emit({
       type: 'merge:started',
       timestamp: operation.startedAt,
@@ -424,6 +435,7 @@ export class MergeEngine {
 
     // Pre-flight: verify branch has commits
     if (!this.branchHasCommits(operation.sourceBranch)) {
+      console.log(`[merge] No commits to merge: ${taskId} — likely empty worktree`);
       const result = this.failMerge(
         operation,
         'No commits to merge. The agent may have completed the task but created no committable files. ' +
@@ -438,6 +450,7 @@ export class MergeEngine {
       validateGitRef(operation.backupTag, 'backupTag');
       this.createBackupTag(operation.backupTag);
     } catch (err) {
+      console.log(`[merge] Backup tag creation failed: ${taskId}: ${err}`);
       const result = this.failMerge(
         operation,
         `Failed to create backup tag: ${err}`,
@@ -452,6 +465,7 @@ export class MergeEngine {
       this.git(['merge', '--ff-only', operation.sourceBranch]);
 
       const filesChanged = this.getFilesChangedCount(operation.backupTag);
+      console.log(`[merge] Fast-forward merge success: ${taskId} (${filesChanged} files)`);
       const result = this.completeMerge(
         operation,
         'fast-forward',
@@ -460,6 +474,7 @@ export class MergeEngine {
       );
       return result;
     } catch {
+      console.log(`[merge] Fast-forward not possible, trying merge-commit: ${taskId}`);
       // Fast-forward not possible, try regular merge
     }
 
@@ -470,6 +485,7 @@ export class MergeEngine {
 
       const commitSha = this.git(['rev-parse', '--short', 'HEAD']).trim();
       const filesChanged = this.getFilesChangedCount(operation.backupTag);
+      console.log(`[merge] Merge-commit success: ${taskId} (${filesChanged} files, ${commitSha})`);
       const result = this.completeMerge(
         operation,
         'merge-commit',
@@ -479,12 +495,14 @@ export class MergeEngine {
       );
       return result;
     } catch {
+      console.log(`[merge] Merge failed, checking for conflicts: ${taskId}`);
       // Merge failed — check for conflicts
     }
 
     // Check for conflicts
     const conflictedFiles = this.getConflictedFiles();
     if (conflictedFiles.length > 0) {
+      console.log(`[merge] Conflicts detected: ${taskId} — ${conflictedFiles.length} file(s): ${conflictedFiles.join(', ')}`);
       operation.conflictedFiles = conflictedFiles;
       this.updateStatus(operation, 'conflicted');
 
@@ -538,8 +556,12 @@ export class MergeEngine {
       startTime
     );
 
-    // Rollback tracked files only. Avoid `git clean -fd` to prevent removing
-    // unrelated untracked artifacts in the repository.
+    // Rollback: first abort any in-progress merge, then reset to backup
+    try {
+      this.git(['merge', '--abort']);
+    } catch {
+      // Ignore - may not have a merge in progress
+    }
     try {
       this.git(['reset', '--hard', operation.backupTag]);
     } catch {

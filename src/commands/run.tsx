@@ -36,6 +36,7 @@ import {
   registerLockCleanupHandlers,
   checkLock,
   detectAndRecoverStaleSession,
+  cleanStaleBeadsLocks,
   registerSession,
   unregisterSession,
   updateRegistryStatus,
@@ -839,9 +840,31 @@ function checkParallelGitPreflight(cwd: string): ParallelGitPreflightResult {
   if (trackedStatus.status !== 0) {
     errors.push('Unable to verify git working tree status.');
   } else if (trackedStatus.stdout.trim().length > 0) {
-    errors.push(
-      'Tracked working tree is not clean. Commit or stash tracked changes before parallel mode.'
-    );
+    // Filter out .ralph-tui/ and .beads/ changes - these are state files
+    // that get modified during execution and should not block parallel mode
+    const modifiedFiles = trackedStatus.stdout.trim().split('\n');
+    const otherChanges = modifiedFiles.filter((line) => {
+      // Git status --porcelain format: XY filename (XY is 2-char status code)
+      // Handle both 'M ' (index) and ' M ' (working tree) formats
+      let filePath;
+      if (line.startsWith(' ')) {
+        // Working tree modified: ' M filename' format
+        filePath = line.substring(3).trim();
+      } else {
+        // Index modified: 'M filename' format
+        filePath = line.substring(2).trim();
+      }
+      // Normalize path: remove leading ./ if present
+      const normalizedPath = filePath.startsWith('./') ? filePath.substring(2) : filePath;
+      // Check if path is in the state directories (with or without leading dot)
+      return !(normalizedPath.startsWith('.ralph-tui/') || normalizedPath.startsWith('ralph-tui/') ||
+               normalizedPath.startsWith('.beads/') || normalizedPath.startsWith('beads/'));
+    });
+    if (otherChanges.length > 0) {
+      errors.push(
+        'Tracked working tree is not clean. Commit or stash tracked changes before parallel mode.'
+      );
+    }
   }
 
   const unmerged = spawnSync('git', ['ls-files', '-u'], baseOptions);
@@ -3796,6 +3819,14 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     console.log('');
   }
 
+  // Clean up stale beads lock files before any br commands are run
+  // This fixes "Unexpected lock state" errors when ralph-tui crashes
+  const cleanedLocks = await cleanStaleBeadsLocks(config.cwd);
+  if (cleanedLocks > 0) {
+    console.log(`🔓 Cleaned ${cleanedLocks} stale beads lock file(s)`);
+    console.log('');
+  }
+
   // Check for existing persisted session file
   const sessionCheck = await checkSession(config.cwd);
   const hasPersistedSessionFile = await hasPersistedSession(config.cwd);
@@ -4370,6 +4401,21 @@ export async function executeRunCommand(args: string[]): Promise<void> {
             case 'merge:rolled-back':
               const rollbackTaskInfo = event.taskTitle ? event.taskTitle : event.taskId;
               writeLog(logColors.warn(`[${time}] [WARN] [merge] Merge rolled back: ${rollbackTaskInfo}: ${event.reason}\n`));
+              break;
+            case 'conflict:detected':
+              writeLog(logColors.warn(`[${time}] [WARN] [merge] Conflict detected in ${event.conflicts?.length ?? 0} file(s): ${event.conflicts?.map(c => c.filePath).join(', ') || 'unknown'}\n`));
+              break;
+            case 'conflict:ai-resolving':
+              writeLog(logColors.info(`[${time}] [INFO] [merge] AI resolving conflict: ${event.filePath}\n`));
+              break;
+            case 'conflict:ai-resolved':
+              writeLog(logColors.success(`[${time}] [INFO] [merge] AI resolved conflict: ${event.result?.filePath} (${event.result?.method})\n`));
+              break;
+            case 'conflict:ai-failed':
+              writeLog(logColors.error(`[${time}] [ERROR] [merge] AI failed to resolve: ${event.filePath}: ${event.error}\n`));
+              break;
+            case 'conflict:resolved':
+              writeLog(logColors.success(`[${time}] [INFO] [merge] All conflicts resolved for ${event.taskId}\n`));
               break;
             case 'parallel:completed':
               writeLog(logColors.success(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms\n`));

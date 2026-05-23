@@ -269,7 +269,7 @@ export class ConflictResolver {
 
   /**
    * Resolve a single conflicted file.
-   * First tries auto-resolution for known file types, then falls back to AI.
+   * First tries auto-resolution for known patterns. If that fails, uses AI.
    */
   private async resolveFile(
     conflict: FileConflict,
@@ -277,7 +277,7 @@ export class ConflictResolver {
     taskId: string,
     taskTitle: string
   ): Promise<ConflictResolutionResult> {
-    // Try auto-resolution for known structural conflicts
+    // Try auto-resolution for known patterns first
     const autoResolved = this.tryAutoResolve(conflict);
     if (autoResolved !== null) {
       const absPath = path.resolve(this.cwd, conflict.filePath);
@@ -292,7 +292,7 @@ export class ConflictResolver {
       };
     }
 
-    // Try AI resolution if available
+    // Auto-resolve failed - use AI for semantic conflict resolution
     if (this.aiResolver) {
       this.emit({
         type: 'conflict:ai-resolving',
@@ -353,28 +353,35 @@ export class ConflictResolver {
   }
 
   /**
-   * Try to auto-resolve common structural conflicts.
-   * Returns resolved content if successful, null if unable to auto-resolve.
+   * Try to auto-resolve conflicts for state directories (.beads, .ralph-tui).
+   * All other conflicts will be resolved by AI.
+   * Returns resolved content if successful, null if AI is needed.
    */
   private tryAutoResolve(conflict: FileConflict): string | null {
     const filePath = conflict.filePath;
 
-    // .beads/issues.jsonl: Merge all unique JSONL entries from both versions
-    if (filePath.endsWith('.beads/issues.jsonl')) {
-      return this.mergeJsonl(conflict.oursContent, conflict.theirsContent, conflict.baseContent);
+    // For .beads/ files, use special handling
+    if (filePath.startsWith('.beads/') || filePath.includes('/.beads/')) {
+      // .beads/issues.jsonl: Merge all unique JSONL entries from both versions
+      if (filePath.endsWith('.beads/issues.jsonl') || filePath.endsWith('issues.jsonl')) {
+        return this.mergeJsonl(conflict.oursContent, conflict.theirsContent, conflict.baseContent);
+      }
+
+      // .beads/beads.db: SQLite database - use ours (worktree loses)
+      if (filePath.endsWith('.beads/beads.db') || filePath.endsWith('beads.db')) {
+        return conflict.oursContent;
+      }
+
+      // Other .beads files: use ours (state files should not conflict)
+      return conflict.oursContent;
     }
 
-    // progress.md: Concatenate entries (avoiding duplicates)
-    if (filePath.endsWith('progress.md')) {
-      return this.mergeProgressMd(conflict.oursContent, conflict.theirsContent, conflict.baseContent);
+    // For .ralph-tui/ files, use ours version (local state)
+    if (filePath.startsWith('.ralph-tui/') || filePath.includes('/.ralph-tui/')) {
+      return conflict.oursContent;
     }
 
-    // README.md: Merge sections if both added content
-    if (filePath.endsWith('README.md') || filePath.endsWith('readme.md')) {
-      return this.mergeReadme(conflict.oursContent, conflict.theirsContent, conflict.baseContent);
-    }
-
-    // Default: cannot auto-resolve
+    // For all other files, AI is needed for semantic merging
     return null;
   }
 
@@ -401,76 +408,6 @@ export class ConflictResolver {
     }
 
     return Array.from(entries).join('\n') + '\n';
-  }
-
-  /**
-   * Merge progress.md by combining unique task entries.
-   * Each entry starts with "## [Date]" - we can merge by keeping unique entries.
-   */
-  private mergeProgressMd(ours: string, theirs: string, base: string): string {
-    const entries = new Map<string, string>(); // entry header -> full content
-
-    // Helper to parse entries from content
-    const parseEntries = (content: string) => {
-      const entries: Map<string, string> = new Map();
-      const lines = content.split('\n');
-      let currentEntry: string[] = [];
-      let currentHeader = '';
-
-      for (const line of lines) {
-        if (line.match(/^##\s+\d{4}-\d{2}-\d{2}/)) {
-          // New entry
-          if (currentHeader && currentEntry.length > 0) {
-            entries.set(currentHeader, currentEntry.join('\n'));
-          }
-          currentHeader = line.trim();
-          currentEntry = [line];
-        } else if (currentHeader) {
-          currentEntry.push(line);
-        }
-      }
-
-      // Don't forget the last entry
-      if (currentHeader && currentEntry.length > 0) {
-        entries.set(currentHeader, currentEntry.join('\n'));
-      }
-
-      return entries;
-    };
-
-    // Merge entries from all three versions
-    const baseEntries = parseEntries(base);
-    const ourEntries = parseEntries(ours);
-    const theirEntries = parseEntries(theirs);
-
-    // Start with base, override with ours and theirs
-    for (const [header, content] of baseEntries) {
-      entries.set(header, content);
-    }
-    for (const [header, content] of ourEntries) {
-      entries.set(header, content);
-    }
-    for (const [header, content] of theirEntries) {
-      entries.set(header, content);
-    }
-
-    // Sort by date (header contains date) and join
-    const sortedHeaders = Array.from(entries.keys()).sort();
-    return sortedHeaders.map(h => entries.get(h)).join('\n\n') + '\n';
-  }
-
-  /**
-   * Merge README by intelligently combining sections.
-   * If both versions added sections, combine them. Prefer ours for conflicting sections.
-   */
-  private mergeReadme(ours: string, theirs: string, base: string): string {
-    // If one side is empty or same as base, use the other
-    if (ours === base || !ours.trim()) return theirs;
-    if (theirs === base || !theirs.trim()) return ours;
-
-    // Both have changes - use ours as primary (it's the session branch we're merging into)
-    // This is a simple heuristic; for complex README conflicts, AI resolution is better
-    return ours;
   }
 
   /**

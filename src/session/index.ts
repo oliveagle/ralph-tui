@@ -438,6 +438,7 @@ export {
   isSessionResumable,
   getSessionSummary,
   detectAndRecoverStaleSession,
+  cleanStaleBeadsLocks,
 } from './persistence.js';
 
 export type {

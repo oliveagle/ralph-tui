@@ -166,9 +166,14 @@ export class WorktreeManager {
     // the wrong database (e.g., a parent project's beads).
     await this.copyBeadsDatabase(worktreePath);
 
-    // Exclude .beads/ from git tracking in this worktree to prevent merge conflicts
-    // The main repo may track .beads/, but worktree modifications should not be committed
+    // Exclude .beads/ and .ralph-tui/ from git tracking in this worktree.
+    // These directories contain state that should not cause merge conflicts.
+    // The main repo may track them, but worktree modifications should not be committed.
     await this.excludeBeadsFromWorktree(worktreePath);
+
+    // Mark .beads/ and .ralph-tui/ files as assume-unchanged to prevent commits
+    // This is needed because info/exclude only works for untracked files.
+    await this.assumeUnchangedStateFiles(worktreePath);
 
     const info: WorktreeInfo = {
       id: worktreeId,
@@ -462,9 +467,9 @@ export class WorktreeManager {
   }
 
   /**
-   * Exclude .beads/ from git tracking in this worktree.
-   * This prevents merge conflicts when workers modify beads state via br close/sync.
-   * The main repo may track .beads/, but worktree modifications should not be committed.
+   * Exclude .beads/ and .ralph-tui/ from git tracking in this worktree.
+   * These directories contain state that should not cause merge conflicts.
+   * The main repo may track them, but worktree modifications should not be committed.
    */
   private async excludeBeadsFromWorktree(worktreePath: string): Promise<void> {
     // For worktrees, .git is a file pointing to the main repo.
@@ -494,13 +499,68 @@ export class WorktreeManager {
       excludeContent = fs.readFileSync(excludePath, 'utf-8');
     }
 
-    if (!excludeContent.includes('.beads/')) {
-      if (excludeContent && !excludeContent.endsWith('\n')) {
-        excludeContent += '\n';
+    // Add patterns for both .beads/ and .ralph-tui/
+    const patterns = ['.beads/', '.ralph-tui/'];
+    let modified = false;
+
+    for (const pattern of patterns) {
+      if (!excludeContent.includes(pattern)) {
+        if (excludeContent && !excludeContent.endsWith('\n')) {
+          excludeContent += '\n';
+        }
+        excludeContent += `${pattern}\n`;
+        modified = true;
       }
-      excludeContent += '.beads/\n';
+    }
+
+    if (modified) {
       fs.mkdirSync(path.dirname(excludePath), { recursive: true });
       fs.writeFileSync(excludePath, excludeContent, 'utf-8');
+    }
+  }
+
+  /**
+   * Mark .beads/ and .ralph-tui/ files as assume-unchanged in the worktree.
+   * This prevents git from tracking changes to these files, even if they're
+   * already tracked in the main repository.
+   *
+   * Unlike info/exclude (which only works for untracked files),
+   * assume-unchanged tells git to ignore changes to tracked files.
+   */
+  private async assumeUnchangedStateFiles(worktreePath: string): Promise<void> {
+    const dirsToExclude = ['.beads', '.ralph-tui'];
+
+    for (const dir of dirsToExclude) {
+      const dirPath = path.join(worktreePath, dir);
+      if (!fs.existsSync(dirPath)) continue;
+
+      // Find all files in the directory recursively
+      const markFilesAssumeUnchanged = (dirPath: string): void => {
+        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(dirPath, entry.name);
+          if (entry.isDirectory()) {
+            markFilesAssumeUnchanged(fullPath);
+          } else if (entry.isFile()) {
+            // Get relative path from worktree root
+            const relativePath = path.relative(worktreePath, fullPath);
+            try {
+              // Use git ls-files to check if file is tracked
+              this.gitInWorktree(worktreePath, ['ls-files', '--error-unmatch', relativePath]);
+              // File is tracked, mark it as assume-unchanged
+              this.gitInWorktree(worktreePath, ['update-index', '--assume-unchanged', relativePath]);
+            } catch {
+              // File is not tracked, no need to mark
+            }
+          }
+        }
+      };
+
+      try {
+        markFilesAssumeUnchanged(dirPath);
+      } catch {
+        // Best effort - don't fail if assume-unchanged fails
+      }
     }
   }
 

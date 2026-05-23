@@ -49,7 +49,7 @@ export const logColors = {
   success: (text: string) => colorize(text, colors.fg.green),
   debug: (text: string) => colorize(text, colors.dim),
   worker: (text: string) => colorize(text, colors.fg.cyan),
-  progress: (text: string) => colorize(text, colors.fg.magenta),
+  progress: (text: string) => colorize(text, `\x1b[38;5;183m`),  // 淡紫色 (lavender)
   merge: (text: string) => colorize(text, colors.fg.blue),
 } as const;
 

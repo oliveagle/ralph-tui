@@ -269,6 +269,8 @@ export class ParallelExecutor {
     this.pendingConflicts = [];
     this.preservedRecoveryWorktrees = [];
     this.returnToOriginalBranchError = null;
+    // Clear merge queue to prevent stale operations from interfering with new execution
+    this.mergeEngine.clearQueue();
   }
 
   /**

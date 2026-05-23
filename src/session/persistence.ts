@@ -682,3 +682,40 @@ export function getSessionSummary(state: PersistedSessionState): {
     prdPath: trackerState.prdPath,
   };
 }
+
+/**
+ * Clean up stale beads lock files.
+ *
+ * beads-rust uses lock files (.sync.lock and .write.lock in .beads/) to manage
+ * concurrent access to the database. When ralph-tui crashes or is killed
+ * unexpectedly, these lock files can remain and cause "Unexpected lock state"
+ * errors when br commands are run.
+ *
+ * This function checks for and removes stale lock files. It should be called
+ * early in the startup process, before any br commands are executed.
+ *
+ * @param cwd Working directory
+ * @returns Number of lock files cleaned up
+ */
+export async function cleanStaleBeadsLocks(cwd: string): Promise<number> {
+  const { unlink } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+
+  const beadsDir = join(cwd, '.beads');
+  const lockFiles = ['.sync.lock', '.write.lock'];
+  let cleanedCount = 0;
+
+  for (const lockFile of lockFiles) {
+    const lockPath = join(beadsDir, lockFile);
+    try {
+      // Try to unlink the lock file - if it doesn't exist or is locked, this will fail
+      await unlink(lockPath);
+      cleanedCount++;
+    } catch {
+      // Lock file doesn't exist or couldn't be removed (may be in use)
+      // Silently continue - this is best-effort cleanup
+    }
+  }
+
+  return cleanedCount;
+}
