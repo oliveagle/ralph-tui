@@ -9,6 +9,7 @@ import { ExecutionEngine, type WorkerModeOptions } from '../engine/index.js';
 import type { EngineEvent, EngineEventListener } from '../engine/types.js';
 import type { RalphConfig } from '../config/types.js';
 import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
+import { mkdir, writeFile } from 'node:fs/promises';
 import type {
   WorkerConfig,
   WorkerResult,
@@ -82,13 +83,25 @@ export class Worker {
    *   where tracker data (e.g., .beads/) may not be accessible.
    */
   async initialize(baseConfig: RalphConfig, tracker: TrackerPlugin): Promise<void> {
+    // Ensure worktree .ralph-tui directory exists before engine initialization.
+    // This prevents "File does not exist" errors when the engine tries to
+    // read progress.md during prompt building.
+    const ralphDir = `${this.config.worktreePath}/.ralph-tui`;
+    await mkdir(ralphDir, { recursive: true });
+    const progressFilePath = `${ralphDir}/progress.md`;
+    try {
+      await writeFile(progressFilePath, '', 'utf-8');
+    } catch {
+      // File may already exist — ignore
+    }
+
     // Create a worker-specific config pointing to the worktree
     const workerConfig: RalphConfig = {
       ...baseConfig,
       cwd: this.config.worktreePath,
       maxIterations: this.maxIterations,
       outputDir: `${this.config.worktreePath}/.ralph-tui/iterations`,
-      progressFile: `${this.config.worktreePath}/.ralph-tui/progress.md`,
+      progressFile: progressFilePath,
       sessionId: `${baseConfig.sessionId ?? 'session'}-${this.id}`,
       // Force auto-commit in parallel mode — required for merge workflow to work.
       // Without commits, there's nothing to merge back to main.
