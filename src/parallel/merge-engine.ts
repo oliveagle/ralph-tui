@@ -494,8 +494,9 @@ export class MergeEngine {
         commitSha
       );
       return result;
-    } catch {
-      console.log(`[merge] Merge failed, checking for conflicts: ${taskId}`);
+    } catch (err) {
+      console.log(`[merge] Merge-commit failed for ${taskId}:`, err);
+      console.log(`[merge] Merge-commit failed, checking for conflicts: ${taskId}`);
       // Merge failed — check for conflicts
     }
 

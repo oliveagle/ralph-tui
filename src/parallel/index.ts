@@ -777,8 +777,12 @@ export class ParallelExecutor {
       }
 
       // Merge failed (non-conflict)
-      // Reset task to open so it can be retried in the next session
-      await this.resetTaskToOpen(workerResult.task.id);
+      // Only reset task to open if the worker didn't complete it successfully.
+      // If taskCompleted=true, the worker already called br close and we shouldn't reopen it.
+      if (!workerResult.taskCompleted) {
+        // Reset task to open so it can be retried in the next session
+        await this.resetTaskToOpen(workerResult.task.id);
+      }
       // Cleanup worktree even on merge failure
       await this.worktreeManager.cleanupByBranch(workerResult.branchName);
       return { success: false, hadConflicts: false, mergeResult };
@@ -923,13 +927,21 @@ export class ParallelExecutor {
           }
         } else {
           // Merge failed or skipped (non-conflict) - requeue/fail based on retry budget.
-          const requeued = await this.handleMergeFailure(result);
-          if (requeued) {
-            retryTasks.push(result.task);
+          // Only reset the task if the worker didn't complete it. If taskCompleted=true,
+          // the agent already did the work and we shouldn't undo the completion.
+          if (result.taskCompleted) {
+            // Worker completed but merge failed — still count as done (work is preserved)
+            groupTasksCompleted++;
+            this.totalTasksCompleted++;
           } else {
-            groupTasksFailed++;
-            this.totalTasksFailed++;
-            groupMergesFailed++;
+            const requeued = await this.handleMergeFailure(result);
+            if (requeued) {
+              retryTasks.push(result.task);
+            } else {
+              groupTasksFailed++;
+              this.totalTasksFailed++;
+              groupMergesFailed++;
+            }
           }
         }
       }
