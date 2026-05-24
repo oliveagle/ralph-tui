@@ -1,56 +1,39 @@
 /**
- * ABOUTME: Git worktree pool manager for parallel execution.
- * Creates, tracks, and cleans up git worktrees used by parallel workers.
- * Each worker gets an isolated worktree with its own branch to make changes
- * independently without filesystem conflicts.
+ * ABOUTME: Branch pool manager for parallel execution without worktrees.
+ * Creates and tracks git branches for workers operating directly
+ * in the main repository directory.
+ *
+ * Design: Instead of creating git worktrees (separate working directories),
+ * workers operate in the main directory by switching branches sequentially.
+ * This eliminates disk I/O overhead of worktree creation and the complexity
+ * of managing separate working directories.
+ *
+ * Workers run one at a time — each switches to its branch, does its work,
+ * commits, then switches back. This preserves the task graph analysis
+ * (knowing which tasks CAN run in parallel) while simplifying execution.
  */
 
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import type { WorktreeInfo, WorktreeManagerConfig } from './types.js';
 
 export interface CleanupAllOptions {
-  /**
-   * Branches that should be preserved for manual recovery.
-   * Matching worktrees are left intact on disk and their branches are not deleted.
-   */
   preserveBranches?: ReadonlySet<string>;
 }
 
-/**
- * Sanitize a task ID into a valid git branch name.
- * Removes/replaces invalid characters and ensures the result is safe for git.
- */
 function sanitizeBranchName(taskId: string): string {
   let sanitized = taskId;
-
-  // Replace spaces and invalid characters with dashes
   sanitized = sanitized.replace(/[\s~^:?*\[\\@{]/g, '-');
-
-  // Remove control characters
   sanitized = sanitized.replace(/\p{Cc}/gu, '');
-
-  // Collapse multiple slashes and dashes
   sanitized = sanitized.replace(/\/+/g, '/').replace(/-+/g, '-');
-
-  // Remove consecutive dots
   sanitized = sanitized.replace(/\.{2,}/g, '.');
-
-  // Strip leading/trailing slashes, dots, and dashes
   sanitized = sanitized.replace(/^[./-]+|[./-]+$/g, '');
-
-  // Don't end with .lock
   if (sanitized.endsWith('.lock')) {
     sanitized = sanitized.slice(0, -5);
   }
-
-  // If sanitization resulted in empty string, use a hash of the original
   if (!sanitized) {
-    // Simple deterministic fallback: use first 8 chars of base64 encoded task ID
     sanitized = Buffer.from(taskId).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'task';
   }
-
   return sanitized;
 }
 
@@ -58,84 +41,49 @@ function sanitizeBranchSegment(value: string): string {
   return sanitizeBranchName(value).replace(/\/+/g, '-') || 'segment';
 }
 
-/** Default minimum free disk space (500 MB) before creating a worktree */
 const DEFAULT_MIN_FREE_DISK_SPACE = 500 * 1024 * 1024;
 
-/**
- * Compute a worktree base directory as a SIBLING of the project.
- *
- * CRITICAL: Worktrees must be outside the project directory to prevent
- * Claude CLI's project detection from walking up and finding the parent's
- * .git directory. When worktrees were inside .ralph-tui/worktrees/, Claude
- * would detect the parent project and write files there instead of the worktree.
- *
- * Standard practice: create worktrees as siblings of the main repo.
- * Uses: {parent}/.ralph-worktrees/{basename}/
- *
- * Example: /home/user/projects/my-app -> /home/user/projects/.ralph-worktrees/my-app/
- */
-function getWorktreeBaseDir(cwd: string): string {
-  const parentDir = path.dirname(cwd);
-  const projectName = path.basename(cwd);
-  return path.join(parentDir, '.ralph-worktrees', projectName);
-}
-
-/**
- * Manages a pool of git worktrees for parallel task execution.
- *
- * Lifecycle:
- * 1. `acquire()` — Creates a worktree + branch for a worker
- * 2. Worker uses the worktree for execution (separate from this class)
- * 3. `release()` — Marks worktree as inactive
- * 4. `cleanupAll()` — Removes all worktrees + branches at session end
- */
 export class WorktreeManager {
   private readonly config: WorktreeManagerConfig;
   private readonly worktrees = new Map<string, WorktreeInfo>();
+  private originalBranch: string | null = null;
 
   constructor(config: Partial<WorktreeManagerConfig> & { cwd: string }) {
-    // Compute worktree directory as sibling of project (outside project tree)
-    // to prevent Claude CLI's project detection from using parent directory
-    const defaultWorktreeDir = getWorktreeBaseDir(config.cwd);
-    // Resolve worktreeDir to absolute path - if a relative path is provided,
-    // resolve it relative to cwd for consistency in path handling
-    const resolvedWorktreeDir = config.worktreeDir
-      ? path.resolve(config.cwd, config.worktreeDir)
-      : defaultWorktreeDir;
     this.config = {
-      worktreeDir: resolvedWorktreeDir,
+      worktreeDir: config.worktreeDir ?? '.ralph-tui/branches',
       cwd: config.cwd,
       maxWorktrees: config.maxWorktrees ?? 8,
       minFreeDiskSpace: config.minFreeDiskSpace ?? DEFAULT_MIN_FREE_DISK_SPACE,
     };
   }
 
+  getOriginalBranch(): string {
+    if (!this.originalBranch) {
+      this.originalBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    }
+    return this.originalBranch;
+  }
+
   /**
-   * Acquire a worktree for a worker.
-   * Creates a new git worktree with a dedicated branch from current HEAD.
-   *
-   * @param workerId - Identifier for the worker using this worktree
-   * @param taskId - Task that will be executed in this worktree
-   * @returns Information about the created worktree
-   * @throws If worktree creation fails or disk space is insufficient
+   * Acquire a branch for a worker. Creates the branch from HEAD
+   * but does NOT switch to it — the Worker handles branch switching.
    */
   async acquire(
     workerId: string,
     taskId: string,
     branchParts?: { sessionId?: string; scopeId?: string }
   ): Promise<WorktreeInfo> {
-    const activeWorktreeCount = this.getActiveWorktreeCount();
-    if (activeWorktreeCount >= this.config.maxWorktrees) {
+    const activeCount = this.getActiveWorktreeCount();
+    if (activeCount >= this.config.maxWorktrees) {
       throw new Error(
-        `Maximum worktrees reached (${this.config.maxWorktrees}). ` +
-          'Release existing worktrees before acquiring new ones.'
+        `Maximum concurrent workers reached (${this.config.maxWorktrees}). ` +
+          'Wait for existing workers to complete before starting new ones.'
       );
     }
 
     await this.checkDiskSpace();
 
     const worktreeId = `worker-${workerId}`;
-    // Sanitize task ID to create a valid git branch name
     const sanitizedTaskId = branchParts ? sanitizeBranchSegment(taskId) : sanitizeBranchName(taskId);
     const branchSegments = [
       'ralph-parallel',
@@ -144,40 +92,16 @@ export class WorktreeManager {
       sanitizedTaskId,
     ].filter((segment): segment is string => Boolean(segment));
     const branchName = branchSegments.join('/');
-    // One worktree per task (task-level directory), never reuse folders
-    const worktreePath = path.join(this.config.worktreeDir, sanitizedTaskId);
 
-    // Ensure parent directory exists
-    await this.ensureWorktreeDir();
+    this.getOriginalBranch();
 
-    // Clean up any stale worktree at this path
-    await this.cleanupStaleWorktree(worktreePath, branchName);
+    await this.cleanupStaleBranch(branchName);
 
-    // Create the worktree with a new branch from HEAD
-    this.git(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
-
-    // Copy ralph-tui config into the worktree so the agent has project context
-    await this.copyConfig(worktreePath);
-
-    // Copy .beads/ database into the worktree so agents can query task metadata.
-    // The .beads/ directory is typically not tracked by git, so it won't be
-    // present in a fresh worktree checkout. Without it, `br show <id>` fails
-    // because the agent falls back to searching parent directories and finds
-    // the wrong database (e.g., a parent project's beads).
-    await this.copyBeadsDatabase(worktreePath);
-
-    // Exclude .beads/ and .ralph-tui/ from git tracking in this worktree.
-    // These directories contain state that should not cause merge conflicts.
-    // The main repo may track them, but worktree modifications should not be committed.
-    await this.excludeBeadsFromWorktree(worktreePath);
-
-    // Mark .beads/ and .ralph-tui/ files as assume-unchanged to prevent commits
-    // This is needed because info/exclude only works for untracked files.
-    await this.assumeUnchangedStateFiles(worktreePath);
+    this.git(['branch', branchName]);
 
     const info: WorktreeInfo = {
       id: worktreeId,
-      path: worktreePath,
+      path: this.config.cwd,
       branch: branchName,
       workerId,
       taskId,
@@ -187,13 +111,10 @@ export class WorktreeManager {
     };
 
     this.worktrees.set(worktreeId, info);
+    console.log(`[branch-pool] Acquired branch '${branchName}' for worker ${workerId} (task: ${taskId})`);
     return info;
   }
 
-  /**
-   * Release a worktree (mark as inactive).
-   * The worktree remains on disk until cleanup.
-   */
   release(worktreeId: string): void {
     const info = this.worktrees.get(worktreeId);
     if (info) {
@@ -202,15 +123,11 @@ export class WorktreeManager {
     }
   }
 
-  /**
-   * Check if a worktree has uncommitted changes.
-   */
   isDirty(worktreeId: string): boolean {
     const info = this.worktrees.get(worktreeId);
     if (!info) return false;
-
     try {
-      const status = this.gitInWorktree(info.path, ['status', '--porcelain']);
+      const status = this.git(['status', '--porcelain']);
       const dirty = status.trim().length > 0;
       info.dirty = dirty;
       return dirty;
@@ -219,42 +136,26 @@ export class WorktreeManager {
     }
   }
 
-  /**
-   * Get information about a specific worktree.
-   */
   getWorktree(worktreeId: string): WorktreeInfo | undefined {
     return this.worktrees.get(worktreeId);
   }
 
-  /**
-   * Get all managed worktrees.
-   */
   getAllWorktrees(): WorktreeInfo[] {
     return [...this.worktrees.values()];
   }
 
-  /**
-   * Count currently active (in-use) worktrees.
-   */
   private getActiveWorktreeCount(): number {
     let count = 0;
     for (const info of this.worktrees.values()) {
-      if (info.active) {
-        count++;
-      }
+      if (info.active) count++;
     }
     return count;
   }
 
-  /**
-   * Get the number of commits ahead of the base branch in a worktree.
-   */
   getCommitCount(worktreeId: string): number {
     const info = this.worktrees.get(worktreeId);
     if (!info) return 0;
-
     try {
-      // Count commits on the branch that aren't on the main HEAD
       const log = this.git(['log', '--oneline', info.branch, '--not', 'HEAD']);
       return log.trim().split('\n').filter((l) => l.trim()).length;
     } catch {
@@ -262,10 +163,6 @@ export class WorktreeManager {
     }
   }
 
-  /**
-   * Remove all worktrees and their branches.
-   * Called at session end or during cleanup.
-   */
   async cleanupAll(options?: CleanupAllOptions): Promise<WorktreeInfo[]> {
     const errors: string[] = [];
     const preserved: WorktreeInfo[] = [];
@@ -276,9 +173,8 @@ export class WorktreeManager {
         preserved.push(info);
         continue;
       }
-
       try {
-        await this.removeWorktree(info);
+        await this.removeBranch(info.branch);
       } catch (err) {
         errors.push(`Failed to clean up ${id}: ${err}`);
       }
@@ -286,41 +182,13 @@ export class WorktreeManager {
 
     this.worktrees.clear();
 
-    // Remove the worktrees directory if empty (worktreeDir is absolute path)
-    try {
-      const entries = fs.readdirSync(this.config.worktreeDir);
-      if (entries.length === 0) {
-        fs.rmdirSync(this.config.worktreeDir);
-        // Also try to remove parent .ralph-worktrees dir if empty
-        const parentDir = path.dirname(this.config.worktreeDir);
-        const parentEntries = fs.readdirSync(parentDir);
-        if (parentEntries.length === 0) {
-          fs.rmdirSync(parentDir);
-        }
-      }
-    } catch {
-      // Directory may not exist or not be empty
-    }
-
     if (errors.length > 0) {
-      throw new Error(
-        `Worktree cleanup had ${errors.length} error(s):\n${errors.join('\n')}`
-      );
+      throw new Error(`Branch cleanup had ${errors.length} error(s):\n${errors.join('\n')}`);
     }
-
     return preserved;
   }
 
-  /**
-   * Remove a worktree by branch name.
-   * This is called after a merge completes (success, failed, or rolled back).
-   * The worktree directory and its branch are removed, freeing up resources.
-   *
-   * @param branchName - The branch name of the worktree to remove
-   * @returns true if the worktree was found and removed, false otherwise
-   */
   async cleanupByBranch(branchName: string): Promise<boolean> {
-    // Find the worktree info by branch name
     let foundWorktreeId: string | null = null;
     for (const [id, info] of this.worktrees.entries()) {
       if (info.branch === branchName) {
@@ -328,418 +196,104 @@ export class WorktreeManager {
         break;
       }
     }
-
-    if (!foundWorktreeId) {
-      return false;
-    }
-
-    const info = this.worktrees.get(foundWorktreeId);
-    if (!info) {
-      return false;
-    }
+    if (!foundWorktreeId) return false;
 
     try {
-      await this.removeWorktree(info);
+      await this.removeBranch(branchName);
     } catch {
-      // Best effort cleanup
+      // Best effort
     }
 
     this.worktrees.delete(foundWorktreeId);
     return true;
   }
 
-  /**
-   * Copy iteration logs from a worktree to the main project before cleanup.
-   * This preserves logs so they can be viewed on session resume.
-   */
-  private preserveIterationLogs(worktreePath: string): void {
-    const worktreeLogsDir = path.join(worktreePath, '.ralph-tui', 'iterations');
-    const mainLogsDir = path.join(this.config.cwd, '.ralph-tui', 'iterations');
-
-    // Skip if worktree has no logs
-    if (!fs.existsSync(worktreeLogsDir)) {
-      return;
-    }
-
+  private async removeBranch(branchName: string): Promise<void> {
     try {
-      // Ensure main logs directory exists
-      fs.mkdirSync(mainLogsDir, { recursive: true });
-
-      // Copy all log files from worktree to main project
-      const logFiles = fs.readdirSync(worktreeLogsDir);
-      for (const file of logFiles) {
-        if (file.endsWith('.log')) {
-          const srcPath = path.join(worktreeLogsDir, file);
-          const destPath = path.join(mainLogsDir, file);
-
-          // Don't overwrite if destination exists (shouldn't happen, but be safe)
-          if (!fs.existsSync(destPath)) {
-            fs.copyFileSync(srcPath, destPath);
-          }
-        }
-      }
-    } catch {
-      // Best effort - don't fail cleanup if log preservation fails
-    }
-  }
-
-  /**
-   * Remove a single worktree and its branch.
-   */
-  private async removeWorktree(info: WorktreeInfo): Promise<void> {
-    // Preserve iteration logs before deleting the worktree
-    this.preserveIterationLogs(info.path);
-
-    // Force remove the worktree
-    try {
-      this.git(['worktree', 'remove', '--force', info.path]);
-    } catch {
-      // If git worktree remove fails, try manual cleanup
-      if (fs.existsSync(info.path)) {
-        fs.rmSync(info.path, { recursive: true, force: true });
-      }
-      // Prune worktree references
-      try {
-        this.git(['worktree', 'prune']);
-      } catch {
-        // Best effort
-      }
-    }
-
-    // Delete the branch
-    try {
-      this.git(['branch', '-D', info.branch]);
+      this.git(['branch', '-D', branchName]);
+      console.log(`[branch-pool] Deleted branch '${branchName}'`);
     } catch {
       // Branch may already be deleted
     }
   }
 
-  /**
-   * Clean up a stale worktree at the given path if it exists.
-   */
-  private async cleanupStaleWorktree(
-    worktreePath: string,
-    branchName: string
-  ): Promise<void> {
-    if (fs.existsSync(worktreePath)) {
-      try {
-        this.git(['worktree', 'remove', '--force', worktreePath]);
-      } catch {
-        fs.rmSync(worktreePath, { recursive: true, force: true });
-        this.git(['worktree', 'prune']);
-      }
-    }
-
-    // Also remove the branch if it exists
+  private async cleanupStaleBranch(branchName: string): Promise<void> {
     try {
-      this.git(['branch', '-D', branchName]);
+      this.git(['rev-parse', '--verify', `refs/heads/${branchName}`]);
+      try {
+        this.git(['branch', '-D', branchName]);
+      } catch {
+        // Best effort
+      }
     } catch {
-      // Branch may not exist
+      // Branch doesn't exist
     }
   }
 
-  /**
-   * Ensure the worktree base directory exists.
-   * Note: Since worktrees are now outside the project (sibling directory),
-   * we no longer need to add them to .gitignore.
-   */
-  private async ensureWorktreeDir(): Promise<void> {
-    // worktreeDir is already an absolute path (sibling of project)
-    fs.mkdirSync(this.config.worktreeDir, { recursive: true });
-  }
-
-  /**
-   * Copy ralph-tui configuration into a worktree.
-   */
-  private async copyConfig(worktreePath: string): Promise<void> {
-    const configDir = path.join(this.config.cwd, '.ralph-tui');
-    const targetDir = path.join(worktreePath, '.ralph-tui');
-
-    // Copy config.toml if it exists
-    const configFile = path.join(configDir, 'config.toml');
-    if (fs.existsSync(configFile)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-      fs.copyFileSync(configFile, path.join(targetDir, 'config.toml'));
-    }
-
-    // Also copy config.yaml / config.yml if they exist
-    for (const ext of ['yaml', 'yml']) {
-      const yamlConfig = path.join(configDir, `config.${ext}`);
-      if (fs.existsSync(yamlConfig)) {
-        fs.mkdirSync(targetDir, { recursive: true });
-        fs.copyFileSync(yamlConfig, path.join(targetDir, `config.${ext}`));
-      }
-    }
-  }
-
-  /**
-   * Copy .beads/ database into a worktree so agents can query task metadata.
-   * The .beads/ directory is typically not tracked by git, so it won't be
-   * present in a fresh worktree checkout.
-   *
-   * This uses a recursive copy to preserve the full database structure
-   * (issues.jsonl, beads.db, etc.).
-   */
-  private async copyBeadsDatabase(worktreePath: string): Promise<void> {
-    const beadsSource = path.join(this.config.cwd, '.beads');
-    const beadsTarget = path.join(worktreePath, '.beads');
-
-    if (!fs.existsSync(beadsSource)) {
-      return;
-    }
-
-    fs.mkdirSync(beadsTarget, { recursive: true });
-
-    // Copy all files/directories from .beads/ to worktree's .beads/
-    const entries = fs.readdirSync(beadsSource);
-    for (const entry of entries) {
-      const srcPath = path.join(beadsSource, entry);
-      const targetPath = path.join(beadsTarget, entry);
-      if (fs.statSync(srcPath).isDirectory()) {
-        fs.cpSync(srcPath, targetPath, { recursive: true });
-      } else {
-        fs.copyFileSync(srcPath, targetPath);
-      }
-    }
-  }
-
-  /**
-   * Exclude .beads/ and .ralph-tui/ from git tracking in this worktree.
-   * These directories contain state that should not cause merge conflicts.
-   * The main repo may track them, but worktree modifications should not be committed.
-   */
-  private async excludeBeadsFromWorktree(worktreePath: string): Promise<void> {
-    // For worktrees, .git is a file pointing to the main repo.
-    // The info/exclude file must be created in the linked git directory.
-    let gitDir: string;
-    const gitFile = path.join(worktreePath, '.git');
-
-    if (fs.existsSync(gitFile) && fs.statSync(gitFile).isFile()) {
-      // .git is a file - read the path to the actual git directory
-      const content = fs.readFileSync(gitFile, 'utf-8').trim();
-      // Format: "gitdir: /path/to/repo/.git/worktrees/..." or "gitdir: ../.git"
-      const match = content.match(/^gitdir:\s*(.+)$/m);
-      if (!match) return;
-      gitDir = match[1]!.trim();
-      if (!path.isAbsolute(gitDir)) {
-        gitDir = path.resolve(worktreePath, gitDir);
-      }
-    } else {
-      // .git is a directory (main repo or bare repo)
-      gitDir = gitFile;
-    }
-
-    const excludePath = path.join(gitDir, 'info', 'exclude');
-    let excludeContent = '';
-
-    if (fs.existsSync(excludePath)) {
-      excludeContent = fs.readFileSync(excludePath, 'utf-8');
-    }
-
-    // Add patterns for both .beads/ and .ralph-tui/
-    const patterns = ['.beads/', '.ralph-tui/'];
-    let modified = false;
-
-    for (const pattern of patterns) {
-      if (!excludeContent.includes(pattern)) {
-        if (excludeContent && !excludeContent.endsWith('\n')) {
-          excludeContent += '\n';
-        }
-        excludeContent += `${pattern}\n`;
-        modified = true;
-      }
-    }
-
-    if (modified) {
-      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-      fs.writeFileSync(excludePath, excludeContent, 'utf-8');
-    }
-  }
-
-  /**
-   * Mark .beads/ and .ralph-tui/ files as assume-unchanged in the worktree.
-   * This prevents git from tracking changes to these files, even if they're
-   * already tracked in the main repository.
-   *
-   * Unlike info/exclude (which only works for untracked files),
-   * assume-unchanged tells git to ignore changes to tracked files.
-   */
-  private async assumeUnchangedStateFiles(worktreePath: string): Promise<void> {
-    const dirsToExclude = ['.beads', '.ralph-tui'];
-
-    for (const dir of dirsToExclude) {
-      const dirPath = path.join(worktreePath, dir);
-      if (!fs.existsSync(dirPath)) continue;
-
-      // Find all files in the directory recursively
-      const markFilesAssumeUnchanged = (dirPath: string): void => {
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        for (const entry of entries) {
-          const fullPath = path.join(dirPath, entry.name);
-          if (entry.isDirectory()) {
-            markFilesAssumeUnchanged(fullPath);
-          } else if (entry.isFile()) {
-            // Get relative path from worktree root
-            const relativePath = path.relative(worktreePath, fullPath);
-            try {
-              // Use git ls-files to check if file is tracked
-              this.gitInWorktree(worktreePath, ['ls-files', '--error-unmatch', relativePath]);
-              // File is tracked, mark it as assume-unchanged
-              this.gitInWorktree(worktreePath, ['update-index', '--assume-unchanged', relativePath]);
-            } catch {
-              // File is not tracked, no need to mark
-            }
-          }
-        }
-      };
-
-      try {
-        markFilesAssumeUnchanged(dirPath);
-      } catch {
-        // Best effort - don't fail if assume-unchanged fails
-      }
-    }
-  }
-
-  /**
-   * Check if there is enough disk space to create a worktree.
-   * Uses Node.js fs.statfs() first, then falls back to `df` when statfs is not
-   * returning a usable value (for APFS and other filesystem quirks).
-   * @throws If available space is below the minimum threshold
-   */
   private async checkDiskSpace(): Promise<void> {
-    const minimumRequired = this.config.minFreeDiskSpace;
-    const minMb = Math.round(minimumRequired / (1024 * 1024));
-
     try {
-      // Prefer statfs (fast and cross-platform), but fall back when it reports
-      // 0/invalid values on filesystems like APFS.
       let available = await this.getAvailableDiskSpaceFromStatFs();
       if (available === null || available <= 0) {
         available = this.getAvailableDiskSpaceFromDf();
       }
+      if (available === null) return;
 
-      if (available === null) {
-        return;
-      }
-
-      if (available < minimumRequired) {
+      if (available < this.config.minFreeDiskSpace) {
         const availMB = Math.round(available / (1024 * 1024));
-        const reqMB = minMb;
-        throw new Error(
-          `Insufficient disk space for worktree: ${availMB}MB available, ${reqMB}MB required`
-        );
+        const reqMB = Math.round(this.config.minFreeDiskSpace / (1024 * 1024));
+        throw new Error(`Insufficient disk space for branch operations: ${availMB}MB available, ${reqMB}MB required`);
       }
     } catch (err) {
-      // Re-throw insufficient space errors
-      if (
-        err instanceof Error &&
-        err.message.includes('Insufficient disk space')
-      ) {
+      if (err instanceof Error && err.message.includes('Insufficient disk space')) {
         throw err;
       }
-      // Disk checks are best-effort; if both methods fail unexpectedly,
-      // continue rather than blocking execution on unknown platforms.
     }
   }
 
-  /**
-   * Read available bytes from fs.statfs.
-   * Returns null if unavailable or unreadable.
-   */
   private async getAvailableDiskSpaceFromStatFs(): Promise<number | null> {
     try {
       const stats = await fs.promises.statfs(this.config.cwd);
       const available = Number(stats.bavail) * Number(stats.bsize);
-      if (!Number.isFinite(available)) {
-        return null;
-      }
-      return available;
+      return Number.isFinite(available) ? available : null;
     } catch {
       return null;
     }
   }
 
-  /**
-   * Read available bytes from `df -k <path>`.
-   * Returns null if parsing fails or output is unavailable.
-   */
   private getAvailableDiskSpaceFromDf(): number | null {
     try {
-      const output = execFileSync('df', ['-k', this.config.cwd], {
-        encoding: 'utf-8',
-      });
+      const output = execFileSync('df', ['-k', this.config.cwd], { encoding: 'utf-8' });
       return this.parseDfAvailableBytes(output);
     } catch {
       return null;
     }
   }
 
-  /**
-   * Parse `df` output and return available bytes.
-   */
   private parseDfAvailableBytes(output: string): number | null {
     const lines = output.trim().split('\n').filter((line) => line.trim().length > 0);
-    if (lines.length < 2) {
-      return null;
-    }
+    if (lines.length < 2) return null;
 
     const header = lines[0]?.toLowerCase();
-    if (!header) {
-      return null;
-    }
+    if (!header) return null;
 
-    const normalizedHeader = header
-      .trim()
-      .split(/\s+/)
-      .map((value) => value.replace('%', '').trim());
+    const normalizedHeader = header.trim().split(/\s+/).map((v) => v.replace('%', '').trim());
+    const availIndex = normalizedHeader.findIndex((h) => h === 'avail' || h === 'available');
+    if (availIndex < 0) return null;
 
-    const availIndex = normalizedHeader.findIndex((headerValue) =>
-      headerValue === 'avail' || headerValue === 'available'
-    );
-    if (availIndex < 0) {
-      return null;
-    }
-
-    // Use the last data row to avoid issues with multiline headers.
     const dataLine = lines.at(-1);
-    if (!dataLine) {
-      return null;
-    }
+    if (!dataLine) return null;
 
     const values = dataLine.trim().split(/\s+/);
-    if (values.length <= availIndex) {
-      return null;
-    }
+    if (values.length <= availIndex) return null;
 
     const availableKb = Number.parseInt(values[availIndex] ?? '', 10);
-    if (Number.isNaN(availableKb) || !Number.isFinite(availableKb) || availableKb < 0) {
-      return null;
-    }
+    if (Number.isNaN(availableKb) || !Number.isFinite(availableKb) || availableKb < 0) return null;
 
     return availableKb * 1024;
   }
 
-  /**
-   * Execute a git command in the main repository.
-   * Uses execFileSync with argument array to prevent shell injection.
-   * Pipes stdio so git output (especially stderr) doesn't bleed through to the TUI.
-   */
   private git(args: string[]): string {
     return execFileSync('git', ['-C', this.config.cwd, ...args], {
-      encoding: 'utf-8',
-      timeout: 30000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  }
-
-  /**
-   * Execute a git command in a specific worktree.
-   * Uses execFileSync with argument array to prevent shell injection.
-   * Pipes stdio so git output doesn't bleed through to the TUI.
-   */
-  private gitInWorktree(worktreePath: string, args: string[]): string {
-    return execFileSync('git', ['-C', worktreePath, ...args], {
       encoding: 'utf-8',
       timeout: 30000,
       stdio: ['pipe', 'pipe', 'pipe'],

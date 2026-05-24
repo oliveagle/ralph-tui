@@ -195,12 +195,21 @@ export function recommendParallelism(
  * Internal heuristic evaluation for parallel recommendation.
  */
 function shouldRunParallelInternal(
-  _groups: ParallelGroup[],
-  _totalTasks: number,
-  _cyclicCount: number
+  groups: ParallelGroup[],
+  totalTasks: number,
+  cyclicCount: number
 ): boolean {
-  // Always run in parallel mode (auto-loop will wait for tasks if none exist)
-  // This allows the executor to keep running and poll for new tasks
+  // Need ≥2 tasks in at least one parallel group
+  const hasParallelGroup = groups.some((g) => g.tasks.length >= 2);
+  if (!hasParallelGroup) return false;
+
+  // Need ≥3 total actionable tasks (overhead not worth it for 2)
+  const actionableTasks = totalTasks - cyclicCount;
+  if (actionableTasks < 3) return false;
+
+  // Must not have >50% cyclic tasks (graph is too tangled)
+  if (totalTasks > 0 && cyclicCount / totalTasks > 0.5) return false;
+
   return true;
 }
 

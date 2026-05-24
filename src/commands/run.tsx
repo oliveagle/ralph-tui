@@ -926,6 +926,8 @@ interface ExtendedRuntimeOptions extends RuntimeOptions {
   autoLoop?: boolean;
   /** Skip local engine; TUI acts as pure client to configured remotes */
   remoteOnly?: boolean;
+  /** Disable worktree isolation in parallel mode - run tasks sequentially in main directory */
+  noWorktree?: boolean;
 }
 
 function addEpicIdOption(options: ExtendedRuntimeOptions, epicId: string): void {
@@ -1168,6 +1170,10 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
         options.directMerge = true;
         break;
 
+      case '--no-worktree':
+        options.noWorktree = true;
+        break;
+
       case '--target-branch':
         if (nextArg && !nextArg.startsWith('-')) {
           options.targetBranch = nextArg;
@@ -1268,6 +1274,7 @@ Options:
   --serial            Force sequential execution (default behavior)
   --sequential        Alias for --serial
   --parallel [N]      Force parallel execution with optional max workers (default workers: 3)
+  --no-worktree       Run tasks sequentially in main directory (no worktree isolation)
   --direct-merge      Merge directly to current branch (skip session branch creation)
   --target-branch <name> Create/use explicit session branch name for parallel mode
   --task-range <range> Filter tasks by index (e.g., 1-5, 3-, -10)
@@ -4249,6 +4256,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         filteredTaskIds,
         scopes: executionScopes,
         autoPoll: options.autoLoop,
+        noWorktree: options.noWorktree,
       });
 
       // Wire up AI conflict resolution if enabled (default: true)

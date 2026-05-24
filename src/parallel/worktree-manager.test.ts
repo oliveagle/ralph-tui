@@ -1,7 +1,7 @@
 /**
- * ABOUTME: Tests for the git worktree pool manager.
- * Uses real temporary git repositories to test worktree creation, release,
- * cleanup, dirty checking, and configuration copying.
+ * ABOUTME: Tests for the branch pool manager (formerly worktree manager).
+ * Uses real temporary git repositories to test branch creation, release,
+ * cleanup, dirty checking, and disk space management.
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
@@ -20,7 +20,6 @@ function createTempRepo(): string {
   git(dir, 'init');
   git(dir, 'config user.email "test@test.com"');
   git(dir, 'config user.name "Test"');
-  // Create an initial commit (worktrees require at least one commit)
   fs.writeFileSync(path.join(dir, 'README.md'), '# Test Repo\n');
   git(dir, 'add .');
   git(dir, 'commit -m "Initial commit"');
@@ -43,28 +42,22 @@ describe('WorktreeManager', () => {
     repoDir = createTempRepo();
     manager = new WorktreeManager({
       cwd: repoDir,
-      worktreeDir: '.ralph-tui/worktrees',
+      worktreeDir: '.ralph-tui/branches',
       maxWorktrees: 4,
     });
   });
 
   afterEach(() => {
-    // Clean up worktrees before removing the repo directory
+    // Clean up any branches we created
     try {
-      const worktrees = git(repoDir, 'worktree list --porcelain');
-      // Force remove any lingering worktrees
-      for (const line of worktrees.split('\n')) {
-        if (line.startsWith('worktree ')) {
-          const wtPath = line.replace('worktree ', '').trim();
-          // Compare normalized paths to determine if this is the main repo
-          const normalizedWtPath = path.resolve(wtPath);
-          const normalizedRepoDir = path.resolve(repoDir);
-          if (normalizedWtPath !== normalizedRepoDir) {
-            try {
-              git(repoDir, `worktree remove --force "${wtPath}"`);
-            } catch {
-              // Best effort
-            }
+      const branches = git(repoDir, 'branch');
+      for (const line of branches.split('\n')) {
+        const branchName = line.replace('*', '').trim();
+        if (branchName.startsWith('ralph-parallel/')) {
+          try {
+            git(repoDir, `branch -D "${branchName}"`);
+          } catch {
+            // Best effort
           }
         }
       }
@@ -85,7 +78,7 @@ describe('WorktreeManager', () => {
       const minFreeDiskSpace = 500 * 1024 * 1024;
       manager = new WorktreeManager({
         cwd: repoDir,
-        worktreeDir: '.ralph-tui/worktrees',
+        worktreeDir: '.ralph-tui/branches',
         maxWorktrees: 4,
         minFreeDiskSpace,
       });
@@ -109,7 +102,7 @@ describe('WorktreeManager', () => {
       const minFreeDiskSpace = 500 * 1024 * 1024;
       manager = new WorktreeManager({
         cwd: repoDir,
-        worktreeDir: '.ralph-tui/worktrees',
+        worktreeDir: '.ralph-tui/branches',
         maxWorktrees: 4,
         minFreeDiskSpace,
       });
@@ -123,7 +116,7 @@ describe('WorktreeManager', () => {
 
       try {
         await expect(managerWithDiskCheck.checkDiskSpace()).rejects.toThrow(
-          'Insufficient disk space for worktree'
+          'Insufficient disk space for branch'
         );
       } finally {
         managerWithDiskCheck.getAvailableDiskSpaceFromStatFs = originalStatFs;
@@ -133,7 +126,7 @@ describe('WorktreeManager', () => {
   });
 
   describe('acquire', () => {
-    test('creates a worktree with a dedicated branch', async () => {
+    test('creates a branch for the task', async () => {
       const info = await manager.acquire('w1', 'task-001');
 
       expect(info.id).toBe('worker-w1');
@@ -144,12 +137,12 @@ describe('WorktreeManager', () => {
       expect(info.dirty).toBe(false);
       expect(info.createdAt).toBeTruthy();
 
-      // Verify the worktree directory exists
-      expect(fs.existsSync(info.path)).toBe(true);
+      // Verify the branch exists in git
+      const branches = git(repoDir, 'branch');
+      expect(branches).toContain('ralph-parallel/task-001');
 
-      // Verify it's a valid git worktree
-      const worktreeList = git(repoDir, 'worktree list --porcelain');
-      expect(worktreeList).toContain(info.path);
+      // Path should be the main repo directory
+      expect(info.path).toBe(repoDir);
     });
 
     test('includes session and scope slugs in branch names when provided', async () => {
@@ -161,29 +154,13 @@ describe('WorktreeManager', () => {
       expect(info.branch).toBe('ralph-parallel/session-abc/UI-Epic/task-001');
     });
 
-    test('creates the worktree base directory', async () => {
-      const worktreeBaseDir = path.join(repoDir, '.ralph-tui/worktrees');
-      expect(fs.existsSync(worktreeBaseDir)).toBe(false);
+    test('creates the .ralph-tui directory', async () => {
+      const ralphDir = path.join(repoDir, '.ralph-tui');
+      fs.mkdirSync(ralphDir, { recursive: true });
 
       await manager.acquire('w1', 'task-001');
 
-      expect(fs.existsSync(worktreeBaseDir)).toBe(true);
-    });
-
-    test('copies config.toml into the worktree', async () => {
-      // Create a config file in the main repo
-      const configDir = path.join(repoDir, '.ralph-tui');
-      fs.mkdirSync(configDir, { recursive: true });
-      fs.writeFileSync(
-        path.join(configDir, 'config.toml'),
-        'agent = "claude"\n'
-      );
-
-      const info = await manager.acquire('w1', 'task-001');
-
-      const worktreeConfig = path.join(info.path, '.ralph-tui', 'config.toml');
-      expect(fs.existsSync(worktreeConfig)).toBe(true);
-      expect(fs.readFileSync(worktreeConfig, 'utf-8')).toBe('agent = "claude"\n');
+      expect(fs.existsSync(ralphDir)).toBe(true);
     });
 
     test('throws when maximum worktrees reached', async () => {
@@ -196,37 +173,39 @@ describe('WorktreeManager', () => {
 
       await expect(
         smallManager.acquire('w2', 'task-002')
-      ).rejects.toThrow('Maximum worktrees reached');
+      ).rejects.toThrow('Maximum concurrent workers reached');
     });
 
-    test('creates multiple worktrees', async () => {
+    test('creates multiple branches for different tasks', async () => {
       const info1 = await manager.acquire('w1', 'task-001');
       const info2 = await manager.acquire('w2', 'task-002');
 
-      expect(info1.path).not.toBe(info2.path);
+      // Both point to the same main directory
+      expect(info1.path).toBe(info2.path);
       expect(info1.branch).not.toBe(info2.branch);
-      expect(fs.existsSync(info1.path)).toBe(true);
-      expect(fs.existsSync(info2.path)).toBe(true);
+
+      // Both branches exist
+      const branches = git(repoDir, 'branch');
+      expect(branches).toContain('ralph-parallel/task-001');
+      expect(branches).toContain('ralph-parallel/task-002');
     });
 
-    test('cleans up stale worktree at the same path', async () => {
+    test('cleans up stale branch at the same name', async () => {
       // First acquire
-      const info1 = await manager.acquire('w1', 'task-001');
-      const firstPath = info1.path;
-      expect(fs.existsSync(firstPath)).toBe(true);
+      await manager.acquire('w1', 'task-001');
 
-      // Release and cleanup to reset internal state
+      // Release and cleanup
       await manager.cleanupAll();
 
-      // Re-create manager and acquire at the same path
+      // Re-create manager and acquire the same branch name
       const newManager = new WorktreeManager({
         cwd: repoDir,
         maxWorktrees: 4,
       });
 
-      // This should succeed by cleaning up the stale worktree
+      // This should succeed by cleaning up the stale branch
       const info2 = await newManager.acquire('w1', 'task-001');
-      expect(fs.existsSync(info2.path)).toBe(true);
+      expect(info2.branch).toBe('ralph-parallel/task-001');
     });
   });
 
@@ -268,10 +247,10 @@ describe('WorktreeManager', () => {
       expect(manager.isDirty('worker-w1')).toBe(false);
     });
 
-    test('returns true when worktree has uncommitted changes', async () => {
+    test('returns true when there are uncommitted changes', async () => {
       const info = await manager.acquire('w1', 'task-001');
 
-      // Create an uncommitted file in the worktree
+      // Create an uncommitted file in the repo directory
       fs.writeFileSync(path.join(info.path, 'uncommitted.txt'), 'dirty\n');
 
       expect(manager.isDirty('worker-w1')).toBe(true);
@@ -305,15 +284,11 @@ describe('WorktreeManager', () => {
   });
 
   describe('cleanupAll', () => {
-    test('removes all worktrees and their branches', async () => {
-      const info1 = await manager.acquire('w1', 'task-001');
-      const info2 = await manager.acquire('w2', 'task-002');
+    test('removes all branches', async () => {
+      await manager.acquire('w1', 'task-001');
+      await manager.acquire('w2', 'task-002');
 
       await manager.cleanupAll();
-
-      // Worktree directories should be removed
-      expect(fs.existsSync(info1.path)).toBe(false);
-      expect(fs.existsSync(info2.path)).toBe(false);
 
       // Branches should be deleted
       const branches = git(repoDir, 'branch');
@@ -324,19 +299,28 @@ describe('WorktreeManager', () => {
       expect(manager.getAllWorktrees()).toHaveLength(0);
     });
 
-    test('removes empty worktree base directory', async () => {
-      await manager.acquire('w1', 'task-001');
-      const worktreeBaseDir = path.join(repoDir, '.ralph-tui/worktrees');
-      expect(fs.existsSync(worktreeBaseDir)).toBe(true);
-
-      await manager.cleanupAll();
-
-      expect(fs.existsSync(worktreeBaseDir)).toBe(false);
-    });
-
     test('succeeds when no worktrees exist', async () => {
       // Should not throw
       await manager.cleanupAll();
+    });
+  });
+
+  describe('cleanupByBranch', () => {
+    test('removes a specific branch by name', async () => {
+      await manager.acquire('w1', 'task-001');
+      await manager.acquire('w2', 'task-002');
+
+      const result = await manager.cleanupByBranch('ralph-parallel/task-001');
+      expect(result).toBe(true);
+
+      const branches = git(repoDir, 'branch');
+      expect(branches).not.toContain('ralph-parallel/task-001');
+      expect(branches).toContain('ralph-parallel/task-002');
+    });
+
+    test('returns false for unknown branch name', async () => {
+      const result = await manager.cleanupByBranch('ralph-parallel/nonexistent');
+      expect(result).toBe(false);
     });
   });
 
@@ -347,10 +331,8 @@ describe('WorktreeManager', () => {
   });
 
   describe('defaults', () => {
-    test('uses default worktree directory when not specified', () => {
+    test('uses default branch directory when not specified', () => {
       const defaultManager = new WorktreeManager({ cwd: repoDir });
-      // Internal config is private, but we can test behavior by acquiring
-      // (it would use ../.ralph-worktrees/<project-name> by default)
       expect(defaultManager).toBeTruthy();
     });
   });

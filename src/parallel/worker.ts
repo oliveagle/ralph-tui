@@ -1,10 +1,19 @@
 /**
- * ABOUTME: Single parallel worker that wraps an ExecutionEngine for one worktree.
- * Each worker operates in an isolated git worktree with a pre-assigned task.
+ * ABOUTME: Single parallel worker that wraps an ExecutionEngine for one branch.
+ * Each worker operates in the main directory by switching to its assigned branch.
  * The tracker is managed centrally by the ParallelExecutor to prevent concurrent
  * writes to the beads database.
+ *
+ * Design change: Workers no longer use separate worktrees. Instead, they:
+ * 1. Switch to their assigned branch (created by WorktreeManager)
+ * 2. Run the execution engine in the main directory
+ * 3. Commit changes to their branch
+ * 4. Switch back to the original branch on completion
+ *
+ * This simplifies execution by eliminating worktree management overhead.
  */
 
+import { execFileSync } from 'node:child_process';
 import { ExecutionEngine, type WorkerModeOptions } from '../engine/index.js';
 import type { EngineEvent, EngineEventListener } from '../engine/types.js';
 import type { RalphConfig } from '../config/types.js';
@@ -22,13 +31,13 @@ import type {
 } from './events.js';
 
 /**
- * A parallel worker that executes a single task in an isolated git worktree.
+ * A parallel worker that executes a single task on its assigned branch.
  *
  * Design:
- * - Wraps an ExecutionEngine with a modified config pointing to the worktree
+ * - Wraps an ExecutionEngine with a modified config pointing to the main directory
  * - Does NOT use the tracker to pick tasks — the task is pre-assigned
  * - Forwards all engine events with a workerId prefix so the executor can route them
- * - Reports status changes back to the ParallelExecutor
+ * - Switches to its branch before starting, switches back after completion
  */
 export class Worker {
   readonly id: string;
@@ -44,11 +53,14 @@ export class Worker {
   private commitCount = 0;
   private readonly listeners: ParallelEventListener[] = [];
   private readonly engineListeners: EngineEventListener[] = [];
+  private originalBranch: string | null = null;
+  private readonly cwd: string;
 
   constructor(config: WorkerConfig, maxIterations: number) {
     this.id = config.id;
     this.config = config;
     this.maxIterations = maxIterations;
+    this.cwd = config.cwd;
   }
 
   /**
@@ -77,45 +89,49 @@ export class Worker {
    * Create and initialize the execution engine for this worker.
    * Must be called before start().
    *
-   * @param baseConfig - The base RalphConfig to modify for this worktree
-   * @param tracker - Pre-initialized tracker plugin from the parent executor.
-   *   The tracker is injected to avoid re-initializing in the worktree directory
-   *   where tracker data (e.g., .beads/) may not be accessible.
+   * @param baseConfig - The base RalphConfig to modify
+   * @param tracker - Pre-initialized tracker plugin from the parent executor
    */
   async initialize(baseConfig: RalphConfig, tracker: TrackerPlugin): Promise<void> {
-    // Ensure worktree .ralph-tui directory exists before engine initialization.
-    // This prevents "File does not exist" errors when the engine tries to
-    // read progress.md during prompt building.
-    const ralphDir = `${this.config.worktreePath}/.ralph-tui`;
+    // Save current branch before switching
+    this.originalBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+
+    // In no-worktree mode, skip branch switching entirely — work on current branch
+    if (!this.config.noWorktree) {
+      // Switch to the worker's assigned branch
+      this.git(['checkout', this.config.branchName]);
+      console.log(`[worker] ${this.id} switched to branch '${this.config.branchName}'`);
+    } else {
+      console.log(`[worker] ${this.id} running in no-worktree mode on branch '${this.originalBranch}'`);
+    }
+
+    // Ensure .ralph-tui directory exists
+    const ralphDir = `${this.cwd}/.ralph-tui`;
     await mkdir(ralphDir, { recursive: true });
     const progressFilePath = `${ralphDir}/progress.md`;
     try {
       await writeFile(progressFilePath, '', 'utf-8');
     } catch {
-      // File may already exist — ignore
+      // File may already exist
     }
 
-    // Create a worker-specific config pointing to the worktree
+    // Create a worker-specific config pointing to the main directory
     const workerConfig: RalphConfig = {
       ...baseConfig,
-      cwd: this.config.worktreePath,
+      cwd: this.cwd,
       maxIterations: this.maxIterations,
-      outputDir: `${this.config.worktreePath}/.ralph-tui/iterations`,
+      outputDir: `${this.cwd}/.ralph-tui/iterations`,
       progressFile: progressFilePath,
       sessionId: `${baseConfig.sessionId ?? 'session'}-${this.id}`,
-      // Force auto-commit in parallel mode — required for merge workflow to work.
-      // Without commits, there's nothing to merge back to main.
       autoCommit: true,
     };
 
     this.engine = new ExecutionEngine(workerConfig);
 
-    // Forward engine events with worker context
     this.engine.on((event: EngineEvent) => {
       this.handleEngineEvent(event);
     });
 
-    // Initialize in worker mode: inject the tracker and force a single task
     const workerMode: WorkerModeOptions = {
       tracker,
       forcedTask: this.config.task,
@@ -127,7 +143,7 @@ export class Worker {
       timestamp: new Date().toISOString(),
       workerId: this.id,
       task: this.config.task,
-      worktreePath: this.config.worktreePath,
+      worktreePath: this.cwd,
       branchName: this.config.branchName,
     });
   }
@@ -156,10 +172,8 @@ export class Worker {
     try {
       await this.engine.start();
 
-      // Check if we were cancelled while the engine was running.
-      // stop() may have been called concurrently, setting this.status = 'cancelled'.
-      // Use getStatus() to bypass TypeScript's type narrowing (it thinks status is still 'running').
       if (this.getStatus() === 'cancelled') {
+        await this.switchBackToOriginalBranch();
         const result: WorkerResult = {
           workerId: this.id,
           task: this.config.task,
@@ -170,7 +184,7 @@ export class Worker {
           error: 'Worker was cancelled',
           branchName: this.config.branchName,
           commitCount: this.commitCount,
-          worktreePath: this.config.worktreePath,
+          worktreePath: this.cwd,
         };
 
         this.emitParallel({
@@ -198,7 +212,7 @@ export class Worker {
         durationMs: Date.now() - this.startTime,
         branchName: this.config.branchName,
         commitCount: this.commitCount,
-        worktreePath: this.config.worktreePath,
+        worktreePath: this.cwd,
       };
 
       this.emitParallel({
@@ -223,7 +237,7 @@ export class Worker {
         error,
         branchName: this.config.branchName,
         commitCount: this.commitCount,
-        worktreePath: this.config.worktreePath,
+        worktreePath: this.cwd,
       };
 
       this.emitParallel({
@@ -235,13 +249,14 @@ export class Worker {
       });
 
       return result;
+    } finally {
+      // Always switch back to original branch
+      await this.switchBackToOriginalBranch();
     }
   }
 
   /**
    * Stop the worker's execution engine.
-   * Sets status to 'cancelled' immediately before stopping the engine so that
-   * start()'s post-start check via getStatus() observes the cancelled state.
    */
   async stop(): Promise<void> {
     this.status = 'cancelled';
@@ -276,7 +291,7 @@ export class Worker {
       maxIterations: this.maxIterations,
       lastOutput: this.lastOutput,
       elapsedMs: this.startTime > 0 ? Date.now() - this.startTime : 0,
-      worktreePath: this.config.worktreePath,
+      worktreePath: this.cwd,
       branchName: this.config.branchName,
       commitSha: this.lastCommitSha,
     };
@@ -300,7 +315,6 @@ export class Worker {
    * Handle engine events: update internal state and forward to listeners.
    */
   private handleEngineEvent(event: EngineEvent): void {
-    // Update internal tracking based on event type
     switch (event.type) {
       case 'iteration:started':
         this.currentIteration = event.iteration;
@@ -328,7 +342,6 @@ export class Worker {
         break;
 
       case 'task:auto-committed':
-        // Capture the commit SHA for display in the worker detail view
         this.commitCount++;
         if (event.commitSha) {
           this.lastCommitSha = event.commitSha;
@@ -336,12 +349,29 @@ export class Worker {
         break;
     }
 
-    // Forward all engine events to registered listeners
     for (const listener of this.engineListeners) {
       try {
         listener(event);
       } catch {
         // Don't let listener errors break the worker
+      }
+    }
+  }
+
+  /**
+   * Switch back to the original branch after worker completion.
+   */
+  private async switchBackToOriginalBranch(): Promise<void> {
+    // In no-worktree mode, we never switched branches, so skip switching back
+    if (this.config.noWorktree) {
+      return;
+    }
+    if (this.originalBranch) {
+      try {
+        this.git(['checkout', this.originalBranch]);
+        console.log(`[worker] ${this.id} switched back to branch '${this.originalBranch}'`);
+      } catch (err) {
+        console.error(`[worker] ${this.id} failed to switch back to original branch:`, err);
       }
     }
   }
@@ -357,5 +387,16 @@ export class Worker {
         // Don't let listener errors break the worker
       }
     }
+  }
+
+  /**
+   * Execute a git command in the repository.
+   */
+  private git(args: string[]): string {
+    return execFileSync('git', ['-C', this.cwd, ...args], {
+      encoding: 'utf-8',
+      timeout: 30000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
   }
 }

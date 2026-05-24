@@ -243,6 +243,9 @@ export interface RuntimeOptions {
   /** Enable parallel execution, optionally with worker count (--parallel [N]) */
   parallel?: number | boolean;
 
+  /** Run parallel workers sequentially in main directory without worktrees (--no-worktree) */
+  noWorktree?: boolean;
+
   /** Skip tasks already marked as completed (closed/completed/cancelled) */
   skipKnownCompleted?: boolean;
 

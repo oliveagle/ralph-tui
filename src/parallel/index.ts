@@ -1,14 +1,19 @@
 /**
  * ABOUTME: ParallelExecutor — top-level coordinator for parallel task execution.
  * Analyzes task dependencies, groups independent tasks, executes them in parallel
- * git worktrees, and merges results back sequentially with conflict resolution.
+ * git branches in the main directory, and merges results back sequentially with conflict resolution.
+ *
+ * Design: Workers operate in the main directory by switching to their assigned branches.
+ * Each worker creates a branch, does its work, commits to it, switches back, then gets merged.
+ * This eliminates worktree overhead while preserving the task graph analysis and merge workflow.
  */
 
-import { readFile, writeFile, appendFile, access, constants } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import type { RalphConfig } from '../config/types.js';
 import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
-import type { EngineEventListener } from '../engine/types.js';
+import { ExecutionEngine, type WorkerModeOptions } from '../engine/index.js';
+import type { EngineEvent, EngineEventListener } from '../engine/types.js';
 import { analyzeTaskGraph, shouldRunParallel } from './task-graph.js';
 import { checkTaskHealth, applyHealthFixes } from './task-health-checker.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -42,6 +47,7 @@ const DEFAULT_PARALLEL_CONFIG: ParallelExecutorConfig = {
   iterationDelay: 1000,
   aiConflictResolution: true,
   maxRequeueCount: 1,
+  noWorktree: false,
 };
 
 interface PendingConflictEntry {
@@ -413,9 +419,16 @@ export class ParallelExecutor {
         }
       }
 
+      // noWorktree mode: run tasks sequentially in main directory
+      if (this.config.noWorktree) {
+        await this.executeSequential(tasks);
+        return;
+      }
+
       // Initialize session branch unless directMerge is enabled.
       // The session branch holds all worker merges, keeping the original branch clean.
-      if (!this.config.directMerge) {
+      // Skip session branch creation in no-worktree mode (changes go directly to current branch).
+      if (!this.config.directMerge && !this.config.noWorktree) {
         const { branch, original } = this.mergeEngine.initializeSessionBranch(
           this.sessionId,
           this.config.sessionBranchName
@@ -588,6 +601,180 @@ export class ParallelExecutor {
     } finally {
       // Always cleanup
       await this.cleanup();
+    }
+  }
+
+  /**
+   * Execute tasks sequentially in the main directory (no-worktree mode).
+   * Each task runs with a git checkpoint for rollback on failure.
+   */
+  private async executeSequential(tasks: TrackerTask[]): Promise<void> {
+    console.log(`[parallel] Starting no-worktree sequential execution: ${tasks.length} task(s)`);
+
+    this.emitParallel({
+      type: 'parallel:started',
+      timestamp: this.startedAt!,
+      sessionId: this.sessionId,
+      analysis: this.taskGraph!,
+      totalGroups: this.taskGraph?.groups.length ?? 1,
+      totalTasks: this.taskGraph?.actionableTaskCount ?? tasks.length,
+      maxWorkers: 1,
+    });
+
+    // Sort tasks by topological order to respect dependencies
+    const sortedTasks = this.taskGraph
+      ? this.taskGraph.groups.flatMap(g => g.tasks)
+      : tasks;
+
+    for (const task of sortedTasks) {
+      if (this.shouldStop) break;
+      await this.waitWhilePaused();
+      if (this.shouldStop) break;
+
+      this.status = 'executing';
+      this.emitParallel({
+        type: 'worker:started',
+        timestamp: new Date().toISOString(),
+        workerId: 'sequential',
+        task,
+      });
+
+      // Create git checkpoint before task
+      const checkpointTag = `ralph-checkpoint-${this.sessionId}-${Date.now()}`;
+      const checkpointSha = this.createGitCheckpoint(checkpointTag);
+
+      try {
+        // Run the task using ExecutionEngine directly in main directory
+        const taskConfig: RalphConfig = {
+          ...this.baseConfig,
+          maxIterations: this.config.maxIterationsPerWorker,
+          sessionId: `${this.baseConfig.sessionId ?? 'session'}-sequential`,
+          autoCommit: true, // Required for sequential mode
+        };
+
+        const engine = new ExecutionEngine(taskConfig);
+
+        // Forward engine events with worker context
+        engine.on((event: EngineEvent) => {
+          // Transform engine events to parallel events
+          const parallelEvent: ParallelEvent = {
+            ...event,
+            workerId: 'sequential',
+          };
+          this.emitParallel(parallelEvent);
+        });
+
+        // Initialize in worker mode with forced task
+        const workerMode: WorkerModeOptions = {
+          tracker: this.tracker,
+          forcedTask: task,
+        };
+        await engine.initialize(workerMode);
+
+        // Run the engine
+        await engine.start();
+
+        const engineState = engine.getState();
+        const taskCompleted = engineState.tasksCompleted > 0;
+
+        if (taskCompleted) {
+          this.totalTasksCompleted++;
+          console.log(`[parallel] Task ${task.id} completed successfully`);
+          this.emitParallel({
+            type: 'worker:completed',
+            timestamp: new Date().toISOString(),
+            workerId: 'sequential',
+            task,
+            result: {
+              workerId: 'sequential',
+              task,
+              success: true,
+              iterationsRun: engineState.currentIteration,
+              taskCompleted: true,
+              durationMs: Date.now() - Date.parse(this.startedAt!),
+              branchName: '',
+              commitCount: 0,
+            },
+          });
+        } else {
+          throw new Error('Task did not complete within iteration limit');
+        }
+      } catch (err) {
+        this.totalTasksFailed++;
+        const error = err instanceof Error ? err.message : String(err);
+        console.error(`[parallel] Task ${task.id} failed: ${error}`);
+
+        // Rollback to checkpoint
+        this.rollbackGitCheckpoint(checkpointSha);
+
+        // Reset task to open for retry
+        try {
+          await this.tracker.updateTaskStatus(task.id, 'open');
+        } catch {
+          // Ignore
+        }
+
+        this.emitParallel({
+          type: 'worker:failed',
+          timestamp: new Date().toISOString(),
+          workerId: 'sequential',
+          task,
+          error,
+        });
+      }
+
+      // Cleanup checkpoint tag
+      try {
+        execFileSync('git', ['tag', '-d', checkpointTag], { cwd: this.config.cwd });
+      } catch {
+        // Ignore
+      }
+    }
+
+    this.status = 'completed';
+    this.emitParallel({
+      type: 'parallel:completed',
+      timestamp: new Date().toISOString(),
+      sessionId: this.sessionId,
+      totalTasksCompleted: this.totalTasksCompleted,
+      totalTasksFailed: this.totalTasksFailed,
+      totalMergesCompleted: 0,
+      totalConflictsResolved: 0,
+      durationMs: Date.now() - Date.parse(this.startedAt!),
+      noWorktreeMode: true,
+    });
+  }
+
+  /**
+   * Create a git checkpoint by tagging the current HEAD.
+   */
+  private createGitCheckpoint(tagName: string): string {
+    try {
+      execFileSync('git', ['tag', tagName, '-m', `Ralph checkpoint for rollback`], {
+        cwd: this.config.cwd,
+        stdio: 'pipe',
+      });
+      const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: this.config.cwd, stdio: 'pipe' }).toString().trim();
+      console.log(`[parallel] Created checkpoint ${tagName} at ${sha}`);
+      return sha;
+    } catch (err) {
+      console.error(`[parallel] Failed to create checkpoint: ${err}`);
+      throw new Error(`Failed to create git checkpoint: ${err}`);
+    }
+  }
+
+  /**
+   * Rollback to a checkpoint by resetting hard to the tagged commit.
+   */
+  private rollbackGitCheckpoint(checkpointSha: string): void {
+    try {
+      execFileSync('git', ['reset', '--hard', checkpointSha], {
+        cwd: this.config.cwd,
+        stdio: 'pipe',
+      });
+      console.log(`[parallel] Rolled back to checkpoint ${checkpointSha}`);
+    } catch (err) {
+      console.error(`[parallel] Failed to rollback to checkpoint: ${err}`);
     }
   }
 
@@ -1053,26 +1240,24 @@ export class ParallelExecutor {
   }
 
   /**
-   * Execute a batch of tasks in parallel using workers.
+   * Execute a batch of tasks sequentially using workers.
+   * Workers run one at a time since they all operate in the main directory
+   * by switching branches. This preserves the task graph analysis while
+   * simplifying execution.
    */
   private async executeBatch(tasks: TrackerTask[]): Promise<WorkerResult[]> {
-    console.log(`[parallel] executeBatch: starting with ${tasks.length} task(s), maxWorkers=${this.config.maxWorkers}`);
+    console.log(`[parallel] executeBatch: starting with ${tasks.length} task(s), sequential execution`);
     this.activeWorkers = [];
+    const workerResults: WorkerResult[] = [];
 
-    // Create workers
-    // Track branch names from worktree acquisition for failure result construction
-    const branchNames: string[] = [];
     // Track tasks that failed to be claimed (blocked by dependencies)
     const blockedTasks: TrackerTask[] = [];
-    // Track tasks that were successfully claimed
-    const claimedTasks: TrackerTask[] = [];
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
       const workerId = `w${this.currentGroupIndex}-${i}`;
 
-      // Acquire worktree - use the sanitized branch name returned by acquire()
-      // since acquire() sanitizes task IDs into valid git branch names
+      // Acquire branch from worktree manager
       const executionScope = (task as { executionScope?: { id: string } }).executionScope;
       const worktreeInfo = await this.worktreeManager.acquire(
         workerId,
@@ -1082,16 +1267,13 @@ export class ParallelExecutor {
           scopeId: executionScope?.id,
         }
       );
-      branchNames.push(worktreeInfo.branch);
 
       // Try to mark task as in_progress. For beads-rust, this triggers claim validation.
-      // If the task is blocked by dependencies, the claim will fail — we should skip it.
       const updatedTask = await this.tracker.updateTaskStatus(task.id, 'in_progress');
       if (!updatedTask) {
-        // Task is blocked by dependencies or claim failed — release worktree and skip
+        // Task is blocked by dependencies — release and skip
         this.worktreeManager.release(`worker-${workerId}`);
         blockedTasks.push(task);
-        // Reset blocked task back to open so the next health check can handle it properly
         try {
           await this.tracker.updateTaskStatus(task.id, 'open');
         } catch (err) {
@@ -1099,8 +1281,8 @@ export class ParallelExecutor {
         }
         continue;
       }
-      claimedTasks.push(task);
 
+      // Create worker
       const worker = new Worker(
         {
           id: workerId,
@@ -1124,18 +1306,37 @@ export class ParallelExecutor {
         }
       });
 
-      // Add worker to activeWorkers BEFORE initialize so that worker:created event
-      // handler can see it in getWorkerStates() (fixes TUI showing fewer running
-      // workers than expected during worker creation)
-      this.activeWorkers.push(worker);
+      this.activeWorkers = [worker];
 
-      // Initialize the worker engine with the shared tracker
-      await worker.initialize(this.baseConfig, this.tracker);
+      try {
+        // Initialize and start the worker (runs in its branch)
+        await worker.initialize(this.baseConfig, this.tracker);
+        const result = await worker.start();
+        workerResults.push(result);
+      } catch (err) {
+        // Worker threw an exception - create failure result
+        const rawError = err instanceof Error ? err.message : String(err);
+        workerResults.push({
+          workerId,
+          task,
+          success: false,
+          iterationsRun: 0,
+          taskCompleted: false,
+          durationMs: 0,
+          error: `Worker ${workerId} crashed: ${rawError}`,
+          branchName: worktreeInfo.branch,
+          commitCount: 0,
+        });
+      } finally {
+        // Release the branch (worker already switched back in start())
+        this.worktreeManager.release(`worker-${workerId}`);
+        this.activeWorkers = [];
+      }
     }
 
-    // If no tasks were claimed, return empty results
-    if (this.activeWorkers.length === 0) {
-      return blockedTasks.map((task) => ({
+    // Add blocked task results at the end
+    for (const task of blockedTasks) {
+      workerResults.push({
         workerId: '',
         task,
         success: false,
@@ -1145,61 +1346,10 @@ export class ParallelExecutor {
         error: `Task '${task.id}' is blocked by unresolved dependencies — complete dependency tasks first`,
         branchName: '',
         commitCount: 0,
-      }));
-    }
-
-    // Start all workers in parallel
-    const workerPromises = this.activeWorkers.map((w) => w.start());
-    const results = await Promise.allSettled(workerPromises);
-
-    // Collect results
-    const workerResults: WorkerResult[] = results.map((result, i) => {
-      if (result.status === 'fulfilled') {
-        return result.value;
-      }
-      // Worker promise rejected — create a failure result with detailed error info
-      const task = claimedTasks[i];
-      const workerId = this.activeWorkers[i]?.id ?? `w${this.currentGroupIndex}-${i}`;
-      const branchName = branchNames[i] ?? '';
-      const rawError = result.reason instanceof Error
-        ? result.reason.message
-        : String(result.reason);
-
-      // Build a descriptive error with context and actionable guidance
-      let errorMessage = `Worker ${workerId} failed for task '${task.id}' (${branchName}): ${rawError}`;
-
-      // Add actionable hints based on error patterns
-      if (rawError.includes('ENOTDIR') || rawError.includes('ENOENT') || rawError.includes('not a directory')) {
-        errorMessage += ' — Worktree may be corrupted. Check worktree directory exists.';
-      } else if (rawError.includes('timeout') || rawError.includes('ETIMEDOUT')) {
-        errorMessage += ' — Agent may be stuck. Consider checking agent health or increasing timeout.';
-      } else if (rawError.includes('permission') || rawError.includes('EACCES')) {
-        errorMessage += ' — Check file permissions in worktree directory.';
-      } else if (rawError.includes('branch') && (rawError.includes('exists') || rawError.includes('invalid'))) {
-        errorMessage += ' — Branch naming issue. Check git branch state.';
-      }
-
-      return {
-        workerId,
-        task,
-        success: false,
-        iterationsRun: 0,
-        taskCompleted: false,
-        durationMs: 0,
-        error: errorMessage,
-        branchName,
-        commitCount: 0,
-      };
-    });
-
-    // Release worktrees for active workers (use "worker-" prefix to match acquire's worktreeId format)
-    for (const worker of this.activeWorkers) {
-      this.worktreeManager.release(`worker-${worker.id}`);
+      });
     }
 
     this.completedResults.push(...workerResults);
-    this.activeWorkers = [];
-
     return workerResults;
   }
 
@@ -1479,28 +1629,13 @@ export class ParallelExecutor {
 
   /**
    * Merge a worker's progress.md into the main progress.md.
-   * This allows learnings from completed tasks to be visible to subsequent workers.
+   * Since workers operate in the main directory, this merges the progress.md
+   * at the time the worker completes (it's the same file we just read).
    */
-  private async mergeProgressFile(workerResult: WorkerResult): Promise<void> {
-    if (!workerResult.worktreePath) return;
-
-    const workerProgressPath = join(workerResult.worktreePath, '.ralph-tui', 'progress.md');
-    const mainProgressPath = join(this.config.cwd, '.ralph-tui', 'progress.md');
-
-    try {
-      // Check if worker's progress file exists
-      await access(workerProgressPath, constants.R_OK);
-
-      // Read the worker's progress content
-      const workerProgress = await readFile(workerProgressPath, 'utf-8');
-      if (!workerProgress.trim()) return;
-
-      // Append to main progress file with a separator
-      const separator = `\n\n---\n\n## Parallel Task: ${workerResult.task.title} (${workerResult.task.id})\n\n`;
-      await appendFile(mainProgressPath, separator + workerProgress);
-    } catch {
-      // Silently ignore if worker progress file doesn't exist or can't be read
-    }
+  private async mergeProgressFile(_workerResult: WorkerResult): Promise<void> {
+    // Workers operate in the main directory - the progress.md was already written there
+    // during execution. No need to merge from a separate worktree.
+    // The progress is already captured by the worker's execution in real-time.
   }
 
   /**

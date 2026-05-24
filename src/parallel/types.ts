@@ -45,6 +45,9 @@ export interface WorkerConfig {
 
   /** Working directory for the project (the main repo cwd) */
   cwd: string;
+
+  /** When true, skip branch switching and work directly on the current branch */
+  noWorktree?: boolean;
 }
 
 /**
@@ -355,6 +358,13 @@ export interface ParallelExecutorConfig {
    * Used for auto-poll mode to keep workers alive while waiting.
    */
   autoPoll?: boolean;
+
+  /**
+   * When enabled, skip worktree isolation and run workers sequentially in the main directory.
+   * This mode runs one agent at a time directly in the working directory, committing changes
+   * after each task completes. No merge operations are needed since changes are applied directly.
+   */
+  noWorktree?: boolean;
 }
 
 /**

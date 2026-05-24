@@ -27,7 +27,7 @@ function workerConfig(id: string, task: TrackerTask): WorkerConfig {
   return {
     id,
     task,
-    worktreePath: `/tmp/worktrees/${id}`,
+    worktreePath: '/tmp/project',
     branchName: `ralph-parallel/${task.id}`,
     cwd: '/tmp/project',
   };
@@ -76,7 +76,7 @@ describe('Worker', () => {
 
       expect(worker.config).toBe(cfg);
       expect(worker.config.task.id).toBe('T1');
-      expect(worker.config.worktreePath).toBe('/tmp/worktrees/w1');
+      expect(worker.config.worktreePath).toBe('/tmp/project');
       expect(worker.config.branchName).toBe('ralph-parallel/T1');
     });
   });
@@ -134,6 +134,10 @@ describe('Worker', () => {
     test('includes accumulated commit count in successful result', async () => {
       const worker = new Worker(workerConfig('w1', mockTask('T1')), 10);
 
+      // Mock git methods
+      (worker as any).originalBranch = 'main';
+      (worker as any).git = () => 'main';
+
       setFakeEngine(worker, {
         start: async () => {
           emitEngineEvent(worker, {
@@ -162,6 +166,10 @@ describe('Worker', () => {
       const worker = new Worker(workerConfig('w1', mockTask('T1')), 10);
       let runCount = 0;
 
+      // Mock git methods
+      (worker as any).originalBranch = 'main';
+      (worker as any).git = () => 'main';
+
       setFakeEngine(worker, {
         start: async () => {
           runCount++;
@@ -188,6 +196,10 @@ describe('Worker', () => {
     test('keeps commit count when worker is cancelled during start', async () => {
       const worker = new Worker(workerConfig('w1', mockTask('T1')), 10);
 
+      // Mock git methods
+      (worker as any).originalBranch = 'main';
+      (worker as any).git = () => 'main';
+
       setFakeEngine(worker, {
         start: async () => {
           emitEngineEvent(worker, {
@@ -209,6 +221,10 @@ describe('Worker', () => {
 
     test('keeps commit count when engine start throws', async () => {
       const worker = new Worker(workerConfig('w1', mockTask('T1')), 10);
+
+      // Mock git methods
+      (worker as any).originalBranch = 'main';
+      (worker as any).git = () => 'main';
 
       setFakeEngine(worker, {
         start: async () => {
@@ -285,7 +301,7 @@ describe('Worker', () => {
     });
   });
 
-  describe('display state with worktree info', () => {
+  describe('display state with branch info', () => {
     test('includes worktreePath from config', () => {
       const task = mockTask('T1');
       const cfg = workerConfig('w1', task);
@@ -293,7 +309,7 @@ describe('Worker', () => {
 
       const state = worker.getDisplayState();
 
-      expect(state.worktreePath).toBe('/tmp/worktrees/w1');
+      expect(state.worktreePath).toBe('/tmp/project');
     });
 
     test('includes branchName from config', () => {
