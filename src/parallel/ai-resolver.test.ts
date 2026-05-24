@@ -77,7 +77,7 @@ describe('tryFastPathResolution', () => {
     expect(result).toBe('const x = 1;');
   });
 
-  test('returns null when both sides have different content', () => {
+  test('merges content when both sides differ with empty base', () => {
     const conflict: FileConflict = {
       filePath: 'test.ts',
       oursContent: 'const x = 1;',
@@ -87,10 +87,10 @@ describe('tryFastPathResolution', () => {
     };
 
     const result = tryFastPathResolution(conflict);
-    expect(result).toBeNull();
+    expect(result).toBe('const x = 1;\nconst x = 2;');
   });
 
-  test('returns null when both sides are empty', () => {
+  test('returns empty string when both sides are empty (identical)', () => {
     const conflict: FileConflict = {
       filePath: 'test.ts',
       oursContent: '',

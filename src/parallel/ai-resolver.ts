@@ -14,6 +14,17 @@ import { runQualityGate } from './quality-gate.js';
 const DEFAULT_TIMEOUT_MS = 120000;
 
 /**
+ * Detect if content is binary (contains null bytes).
+ */
+function isBinaryContent(content: string): boolean {
+  if (!content) return false;
+  for (let i = 0; i < Math.min(content.length, 8000); i++) {
+    if (content.charCodeAt(i) === 0) return true;
+  }
+  return false;
+}
+
+/**
  * Merge content from two versions by combining unique lines.
  * Used when parallel workers created/modified a file independently.
  * Preserves line order from 'ours' first, then adds unique lines from 'theirs'.
@@ -52,6 +63,11 @@ export function createAiResolver(config: RalphConfig): AiResolverCallback {
   const maxAttempts = config.conflictResolution?.qualityGate?.maxAttempts ?? 3;
 
   return async (conflict, taskContext) => {
+    // Skip binary files - cannot be meaningfully resolved by AI
+    if (isBinaryContent(conflict.oursContent) || isBinaryContent(conflict.theirsContent)) {
+      return conflict.theirsContent || conflict.oursContent;
+    }
+
     // Fast-path: Check for trivial cases before spawning agent
     const fastResult = tryFastPathResolution(conflict);
     if (fastResult !== null) {

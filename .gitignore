@@ -46,6 +46,16 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Python build cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Python virtual environments
+venv/
+.venv/
+
 # Ralph TUI runtime (all user-specific state)
 .ralph-tui/
 .envrc

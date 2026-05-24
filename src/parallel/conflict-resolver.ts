@@ -353,12 +353,32 @@ export class ConflictResolver {
   }
 
   /**
-   * Try to auto-resolve conflicts for state directories (.beads, .ralph-tui).
+   * Detect if content is binary (contains null bytes or high ratio of non-UTF-8 chars).
+   */
+  private isBinaryContent(content: string): boolean {
+    if (!content) return false;
+    // Null bytes are the most reliable indicator of binary content
+    for (let i = 0; i < Math.min(content.length, 8000); i++) {
+      if (content.charCodeAt(i) === 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Try to auto-resolve conflicts for state directories (.beads, .ralph-tui),
+   * binary/build artifacts, and other known patterns.
    * All other conflicts will be resolved by AI.
    * Returns resolved content if successful, null if AI is needed.
    */
   private tryAutoResolve(conflict: FileConflict): string | null {
     const filePath = conflict.filePath;
+
+    // Binary files: take theirs (worker's build artifact).
+    // Binary content can't be meaningfully merged, and gitignore should prevent
+    // tracking — but if it's already tracked, prefer the worker's version.
+    if (this.isBinaryContent(conflict.theirsContent)) {
+      return conflict.theirsContent;
+    }
 
     // For .beads/ files, use special handling
     if (filePath.startsWith('.beads/') || filePath.includes('/.beads/')) {
