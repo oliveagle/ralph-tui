@@ -572,9 +572,11 @@ export class MergeEngine {
     }
 
     // Non-conflict merge failure
+    const headBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    const failureDetail = this.diagnoseMergeFailure(operation.sourceBranch, headBranch);
     const result = this.failMerge(
       operation,
-      'Merge failed for unknown reason',
+      `Merge failed without conflicts: ${failureDetail}`,
       startTime
     );
 
@@ -683,6 +685,42 @@ export class MergeEngine {
       return count > 0;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Diagnose why a merge failed by inspecting git state.
+   * Returns a human-readable explanation with actionable guidance.
+   */
+  private diagnoseMergeFailure(sourceBranch: string, currentBranch: string): string {
+    // Check if source branch exists
+    let sourceExists = false;
+    try {
+      validateGitRef(sourceBranch, 'sourceBranch');
+      this.git(['rev-parse', '--verify', `refs/heads/${sourceBranch}`]);
+      sourceExists = true;
+    } catch {
+      // Branch doesn't exist
+    }
+
+    if (!sourceExists) {
+      return `Source branch '${sourceBranch}' does not exist. The worktree may have been cleaned up prematurely.`;
+    }
+
+    // Check branch relationship
+    try {
+      const sourceAhead = this.git(['rev-list', '--count', `${sourceBranch}..HEAD`]).trim();
+      const targetAhead = this.git(['rev-list', '--count', `HEAD..${sourceBranch}`]).trim();
+
+      if (targetAhead === '0') {
+        return `Branch '${sourceBranch}' is already merged into '${currentBranch}'. No additional commits to merge.`;
+      }
+      if (sourceAhead === '0') {
+        return `Branch '${sourceBranch}' has no commits ahead of '${currentBranch}'. Worktree may have stale changes.`;
+      }
+      return `Branch '${sourceBranch}' diverges from '${currentBranch}' (${targetAhead} commits ahead, ${sourceAhead} behind). Neither fast-forward nor clean merge possible.`;
+    } catch (err) {
+      return `Unable to determine merge reason: ${err instanceof Error ? err.message : String(err)}. Check git state manually.`;
     }
   }
 

@@ -148,13 +148,28 @@ export class ConflictResolver {
       validateGitRef(operation.sourceBranch, 'sourceBranch');
       try {
         this.git(['merge', '--no-commit', operation.sourceBranch]);
-      } catch {
-        // Failed to restart merge
+      } catch (err) {
+        const branchName = operation.sourceBranch;
+        const rawError = err instanceof Error ? err.message : String(err);
+
+        // Diagnose why restart failed
+        let diagnosis = '';
+        try {
+          const currentBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+          if (branchName === currentBranch) {
+            diagnosis = ` — cannot merge '${branchName}' into itself (worktree may be on the same branch as merge target)`;
+          }
+          // Check if branch exists
+          this.git(['rev-parse', '--verify', `refs/heads/${branchName}`]);
+        } catch {
+          diagnosis = ` — branch '${branchName}' does not exist or has been deleted`;
+        }
+
         return conflictedFiles.map(filePath => ({
           filePath,
           success: false,
           method: 'auto' as const,
-          error: 'Cannot restart merge - merge state is lost',
+          error: `Cannot restart merge for '${filePath}': ${rawError}${diagnosis}. The merge state was lost (possibly from a prior abort). This may require manual intervention.`,
         }));
       }
     }
@@ -331,24 +346,52 @@ export class ConflictResolver {
 
           return result;
         }
+
+        // AI returned null — this means the AI model refused to resolve
+        return {
+          filePath: conflict.filePath,
+          success: false,
+          method: 'ai',
+          error: `AI resolver returned no result for '${conflict.filePath}'. The model may have refused or was unable to resolve the conflict — review manually or try again.`,
+        };
       } catch (err) {
+        const errorDetail = err instanceof Error ? err.message : String(err);
         this.emit({
           type: 'conflict:ai-failed',
           timestamp: new Date().toISOString(),
           operationId,
           taskId,
           filePath: conflict.filePath,
-          error: `${err}`,
+          error: `AI resolution threw an error: ${errorDetail}`,
         });
+
+        // Categorize the error for better messaging
+        let errorMessage: string;
+        if (errorDetail.includes('timeout') || errorDetail.includes('ETIMEDOUT')) {
+          errorMessage = `AI resolution timed out for '${conflict.filePath}' (model API may be overloaded). Retry with a simpler conflict or resolve manually.`;
+        } else if (errorDetail.includes('rate limit') || errorDetail.includes('429')) {
+          errorMessage = `AI resolution hit a rate limit for '${conflict.filePath}'. Wait and retry later, or resolve manually.`;
+        } else if (errorDetail.includes('token') || errorDetail.includes('context length') || errorDetail.includes('max_tokens')) {
+          errorMessage = `AI resolution exceeded token limits for '${conflict.filePath}'. The conflict may be too large — resolve manually or simplify the file.`;
+        } else {
+          errorMessage = `AI resolution failed for '${conflict.filePath}': ${errorDetail}`;
+        }
+
+        return {
+          filePath: conflict.filePath,
+          success: false,
+          method: 'ai',
+          error: errorMessage,
+        };
       }
     }
 
-    // AI resolution failed or unavailable
+    // AI resolution was not configured
     return {
       filePath: conflict.filePath,
       success: false,
       method: 'auto',
-      error: 'Conflict could not be auto-resolved and AI resolution failed',
+      error: `Conflict in '${conflict.filePath}' could not be auto-resolved and AI resolution is not configured. Ensure setAiResolver() was called with a valid AI resolver callback.`,
     };
   }
 

@@ -123,10 +123,9 @@ export async function executeRaloopCommand(args: string[]): Promise<void> {
   const maxIterations = options.count;
   const commands = options.commands;
 
-  // If --patrol mode is enabled via daemon flag or explicit detection
-  if (options.daemon || commands.length === 0) {
-    // Patrol mode: integrate with patrol.ts
-    await executePatrolMode(intervalMs);
+  // Default: patrol mode (beads task monitoring)
+  if (commands.length === 0) {
+    await executePatrolCommand();
     return;
   }
 
@@ -205,58 +204,6 @@ export async function executeRaloopCommand(args: string[]): Promise<void> {
 }
 
 /**
- * Execute raloop in patrol mode using patrol.ts integration.
- */
-async function executePatrolMode(intervalMs: number): Promise<void> {
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════');
-  console.log('                    Ralph Patrol Mode Started                  ');
-  console.log('═══════════════════════════════════════════════════════════════');
-  console.log('');
-  console.log(`  Interval:   ${intervalMs}ms (${intervalMs / 1000}s)`);
-  console.log('  Mode:       Beads task monitoring');
-  console.log('');
-  console.log('═══════════════════════════════════════════════════════════════');
-  console.log('');
-
-  const { registerBuiltinAgents } = await import('../plugins/agents/builtin/index.js');
-  const { registerBuiltinTrackers } = await import('../plugins/trackers/builtin/index.js');
-  const { getTrackerRegistry } = await import('../plugins/trackers/registry.js');
-  const { getAgentRegistry } = await import('../plugins/agents/registry.js');
-  const { buildConfig } = await import('../config/index.js');
-  const { DeadlockResolver } = await import('../parallel/deadlock-resolver.js');
-
-  // Initialize plugins (same pattern as run.tsx)
-  registerBuiltinAgents();
-  registerBuiltinTrackers();
-
-  const agentRegistry = getAgentRegistry();
-  const trackerRegistry = getTrackerRegistry();
-  await Promise.all([agentRegistry.initialize(), trackerRegistry.initialize()]);
-
-  const config = await buildConfig({});
-  if (!config) {
-    console.error('[raloop] Failed to build configuration');
-    process.exit(1);
-  }
-  const tracker = await trackerRegistry.getInstance(config.tracker);
-
-  const deadlockResolver = new DeadlockResolver(
-    { cwd: process.cwd(), sessionId: 'raloop', worktreeDir: '.ralph-tui/worktrees' },
-    tracker,
-    config
-  );
-
-  const patrolConfig: PatrolConfig = {
-    intervalSeconds: Math.floor(intervalMs / 1000),
-    useAiResolver: true,
-    stuckThresholdMs: 10 * 60_000,
-  };
-
-  await startPatrol(tracker, deadlockResolver, patrolConfig);
-}
-
-/**
  * Sleep for specified milliseconds.
  */
 function sleep(ms: number): Promise<void> {
@@ -286,31 +233,32 @@ async function forkAsDaemon(args: string[]): Promise<void> {
  */
 export function printRaloopHelp(): void {
   console.log(`
-ralph-tui raloop - Run an automated patrol loop
+ralph-tui raloop - Automated patrol loop for beads task monitoring
 
 Usage: ralph-tui raloop [options]
 
 Options:
-  -i, --interval <ms>   Loop interval in milliseconds (default: 5000)
+  -i, --interval <ms>   Loop interval in milliseconds (default: 300000 = 5min)
   -c, --count <n>       Number of iterations (default: infinite)
-  -C, --command <cmd>   Commands to run each iteration (default: git status)
+  -C, --command <cmd>   Commands to run each iteration (default: patrol mode)
   -d, --daemon          Run as a background daemon
   -h, --help            Show this help message
 
 Description:
-  Runs commands in a loop at a specified interval. This is a convenience
-  wrapper around the patrol functionality, providing a dedicated CLI command
-  for automated polling and monitoring.
+  When called without arguments, starts the beads patrol agent that:
+  - Monitors all bead task statuses every 5 minutes
+  - Detects stuck tasks (in_progress with no progress)
+  - Detects dependency issues (blocked tasks)
+  - Uses AI agent to analyze and auto-resolve issues
+  - Records patrol findings to .ralph-tui/patrol/
 
-  Multiple commands can be specified with repeated -C flags or as arguments
-  after --command. They are executed sequentially each iteration.
+  With -C, runs custom shell commands in a loop instead.
 
 Examples:
-  ralph-tui raloop                           # Run 'git status' every 5s
-  ralph-tui raloop -C 'git pull'             # Run 'git pull' every 5s
-  ralph-tui raloop -i 10000 -C 'git status'  # Every 10 seconds
-  ralph-tui raloop -c 5 -C 'git status'      # Run 5 times then stop
-  ralph-tui raloop -C 'git status' 'git log' # Multiple commands per iteration
-  ralph-tui raloop --daemon                  # Run as background daemon
+  ralph-tui raloop                           # Patrol beads tasks every 5min
+  ralph-tui raloop -C 'git status'           # Custom command loop every 5min
+  ralph-tui raloop -i 10000 -C 'git pull'   # Custom interval and command
+  ralph-tui raloop -c 5 -C 'git status'     # Run 5 times then stop
+  ralph-tui raloop --daemon                 # Run as background daemon
 `);
 }

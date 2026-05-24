@@ -734,16 +734,30 @@ export class ParallelExecutor {
     hadConflicts: boolean;
     mergeResult?: MergeResult;
   }> {
+    // Case: task was completed by the agent but no git commits were created
+    // (e.g., output files are in .gitignore). The agent already closed the task,
+    // so we should complete it in the tracker and skip the merge entirely.
+    if (workerResult.taskCompleted && workerResult.commitCount === 0) {
+      console.log(`[parallel] Task ${workerResult.task.id} completed by agent but no commits to merge — completing task in tracker only`);
+      try {
+        await this.tracker.completeTask(workerResult.task.id);
+      } catch {
+        // Task may already be completed — best effort
+      }
+      // Merge worker's progress.md into main so learnings are shared
+      await this.mergeProgressFile(workerResult);
+      // Cleanup worktree
+      await this.worktreeManager.cleanupByBranch(workerResult.branchName);
+      return { success: true, hadConflicts: false };
+    }
+
     // Check if merge should be attempted
-    const shouldMerge = workerResult.success &&
-      (workerResult.taskCompleted || workerResult.commitCount > 0);
+    const shouldMerge = workerResult.success && workerResult.commitCount > 0;
 
     if (!shouldMerge) {
       const skipReason = !workerResult.success
         ? `worker failed: ${workerResult.error ?? 'unknown error'}`
-        : workerResult.commitCount === 0
-          ? 'no commits made (files may be in .gitignore)'
-          : 'unexpected state';
+        : 'no commits made';
 
       console.warn(`[parallel] Skipping merge for task ${workerResult.task.id}: ${skipReason}`);
       return { success: false, hadConflicts: false };
@@ -1128,7 +1142,7 @@ export class ParallelExecutor {
         iterationsRun: 0,
         taskCompleted: false,
         durationMs: 0,
-        error: 'Task is blocked by dependencies — could not claim',
+        error: `Task '${task.id}' is blocked by unresolved dependencies — complete dependency tasks first`,
         branchName: '',
         commitCount: 0,
       }));
@@ -1143,20 +1157,37 @@ export class ParallelExecutor {
       if (result.status === 'fulfilled') {
         return result.value;
       }
-      // Worker promise rejected — create a failure result
+      // Worker promise rejected — create a failure result with detailed error info
       const task = claimedTasks[i];
+      const workerId = this.activeWorkers[i]?.id ?? `w${this.currentGroupIndex}-${i}`;
+      const branchName = branchNames[i] ?? '';
+      const rawError = result.reason instanceof Error
+        ? result.reason.message
+        : String(result.reason);
+
+      // Build a descriptive error with context and actionable guidance
+      let errorMessage = `Worker ${workerId} failed for task '${task.id}' (${branchName}): ${rawError}`;
+
+      // Add actionable hints based on error patterns
+      if (rawError.includes('ENOTDIR') || rawError.includes('ENOENT') || rawError.includes('not a directory')) {
+        errorMessage += ' — Worktree may be corrupted. Check worktree directory exists.';
+      } else if (rawError.includes('timeout') || rawError.includes('ETIMEDOUT')) {
+        errorMessage += ' — Agent may be stuck. Consider checking agent health or increasing timeout.';
+      } else if (rawError.includes('permission') || rawError.includes('EACCES')) {
+        errorMessage += ' — Check file permissions in worktree directory.';
+      } else if (rawError.includes('branch') && (rawError.includes('exists') || rawError.includes('invalid'))) {
+        errorMessage += ' — Branch naming issue. Check git branch state.';
+      }
+
       return {
-        workerId: this.activeWorkers[i].id,
+        workerId,
         task,
         success: false,
         iterationsRun: 0,
         taskCompleted: false,
         durationMs: 0,
-        error:
-          result.reason instanceof Error
-            ? result.reason.message
-            : String(result.reason),
-        branchName: branchNames[i],
+        error: errorMessage,
+        branchName,
         commitCount: 0,
       };
     });

@@ -149,8 +149,8 @@ Examples:
   ralph-tui info -c                      # Copyable format for GitHub issues
   ralph-tui skills list                  # List bundled skills
   ralph-tui skills install --force       # Force reinstall all skills
-  ralph-tui raloop                       # Run patrol loop (default: git status every 5s)
-  ralph-tui raloop -i 10000 -C 'git pull' # Custom interval and command
+  ralph-tui raloop                       # Patrol beads tasks every 5min
+  ralph-tui raloop -C 'git pull'           # Custom command loop every 5min
   ralph-tui raloop -c 5                  # Run 5 iterations then stop
   ralph-tui run --listen                 # Run with remote listener enabled
   ralph-tui run --listen --rotate-token  # Rotate token and start listener

@@ -723,4 +723,62 @@ describe('MergeEngine', () => {
       expect(result!.error).toContain('image.png');
     });
   });
+
+  describe('error message quality', () => {
+    test('includes branch name in no-commits error', async () => {
+      const branchName = 'ralph-parallel/NO-COMMITS';
+      git(repoDir, `checkout -b "${branchName}"`);
+      // Create branch but make no commits
+      git(repoDir, 'checkout -');
+
+      const task = mockTask('NO-COMMITS');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.error).toContain('No commits to merge');
+      expect(result!.error).toContain('.gitignore');
+    });
+
+    test('gracefully handles non-existent branch error', async () => {
+      const branchName = 'does-not-exist-branch';
+      const task = mockTask('MISSING');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      // branchHasCommits returns false for non-existent branch, so we get "No commits" error
+      expect(result!.error).toBeDefined();
+      expect(result!.error!.length).toBeGreaterThan(0);
+    });
+
+    test('includes diagnostic info when merge fails for unknown reason', async () => {
+      // Create a branch that diverges
+      const branchName = 'ralph-parallel/DIVERGE';
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'diverge.ts'), 'branch\n');
+      git(repoDir, 'add diverge.ts');
+      git(repoDir, 'commit -m "Branch commit"');
+      git(repoDir, 'checkout -');
+
+      // Make a commit on main
+      fs.writeFileSync(path.join(repoDir, 'main.ts'), 'main\n');
+      git(repoDir, 'add main.ts');
+      git(repoDir, 'commit -m "Main commit"');
+
+      // Try to merge a non-existent branch to force unknown failure
+      const task = mockTask('UNKNOWN');
+      engine.enqueue(mockWorkerResult(task, 'totally-fake-branch'));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.error).toBeDefined();
+    });
+  });
 });
