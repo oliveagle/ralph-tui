@@ -53,7 +53,7 @@ export interface PatrolConfig {
 }
 
 const DEFAULT_CONFIG: PatrolConfig = {
-  intervalSeconds: 30,
+  intervalSeconds: 300,
   useAiResolver: true,
   stuckThresholdMs: 10 * 60_000, // 10 minutes
 };
@@ -260,6 +260,38 @@ async function savePatrolResult(result: PatrolResult): Promise<void> {
   const logEntry = `[${result.timestamp}] Patrol: ${result.tasksTotal} tasks, ${result.issuesFound} issues, ${result.issuesResolved} resolved\n`;
 
   await fs.promises.appendFile(logFile, logEntry, 'utf-8');
+}
+
+export async function executePatrolCommand(): Promise<void> {
+  console.log('[raloop] Starting raloop - automated patrol agent');
+  console.log(`[raloop] Interval: ${DEFAULT_CONFIG.intervalSeconds}s, AI resolver: ${DEFAULT_CONFIG.useAiResolver}`);
+  console.log('[raloop] Press Ctrl+C to stop');
+
+  const { registerBuiltinAgents } = await import('../plugins/agents/builtin/index.js');
+  const { registerBuiltinTrackers } = await import('../plugins/trackers/builtin/index.js');
+  const { getTrackerRegistry } = await import('../plugins/trackers/registry.js');
+  const { getAgentRegistry } = await import('../plugins/agents/registry.js');
+  const { buildConfig } = await import('../config/index.js');
+  const { DeadlockResolver } = await import('../parallel/deadlock-resolver.js');
+
+  // Initialize plugins (same pattern as run.tsx)
+  registerBuiltinAgents();
+  registerBuiltinTrackers();
+
+  const agentRegistry = getAgentRegistry();
+  const trackerRegistry = getTrackerRegistry();
+  await Promise.all([agentRegistry.initialize(), trackerRegistry.initialize()]);
+
+  const config = await buildConfig({});
+  const tracker = await trackerRegistry.getInstance(config.tracker);
+
+  const deadlockResolver = new DeadlockResolver(
+    { cwd: process.cwd(), sessionId: 'raloop', worktreeDir: '.ralph-tui/worktrees' },
+    tracker,
+    config
+  );
+
+  await startPatrol(tracker, deadlockResolver, DEFAULT_CONFIG);
 }
 
 /**

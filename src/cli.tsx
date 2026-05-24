@@ -22,6 +22,7 @@ import {
   executeInfoCommand,
   executeSkillsCommand,
   executeRemoteCommand,
+  executeRaloopCommand,
 } from './commands/index.js';
 import { checkBunVersion } from './utils/validation.js';
 import pkg from '../package.json' with { type: 'json' };
@@ -57,6 +58,7 @@ Commands:
   resume [options]    Resume an interrupted session
   status [options]    Check session status (headless, for CI/scripts)
   remote [subcommand] Manage remote server configurations
+  raloop [options]    Run automated patrol loop
   logs [options]      View/manage iteration output logs
   setup [options]     Run interactive project setup (alias: init)
   doctor [options]    Diagnose agent configuration issues
@@ -147,6 +149,9 @@ Examples:
   ralph-tui info -c                      # Copyable format for GitHub issues
   ralph-tui skills list                  # List bundled skills
   ralph-tui skills install --force       # Force reinstall all skills
+  ralph-tui raloop                       # Run patrol loop (default: git status every 5s)
+  ralph-tui raloop -i 10000 -C 'git pull' # Custom interval and command
+  ralph-tui raloop -c 5                  # Run 5 iterations then stop
   ralph-tui run --listen                 # Run with remote listener enabled
   ralph-tui run --listen --rotate-token  # Rotate token and start listener
   ralph-tui remote add prod server:7890 --token abc  # Add remote
@@ -261,6 +266,12 @@ async function handleSubcommand(args: string[]): Promise<boolean> {
   // Remote command (manage remote configurations)
   if (command === 'remote') {
     await executeRemoteCommand(args.slice(1));
+    return true;
+  }
+
+  // Raloop command (automated patrol loop)
+  if (command === 'raloop') {
+    await executeRaloopCommand(args.slice(1));
     return true;
   }
 
