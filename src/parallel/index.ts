@@ -304,6 +304,7 @@ export class ParallelExecutor {
       });
 
       if (healthCheck.issues.length > 0) {
+        console.log(`[parallel] Health check found ${healthCheck.issues.length} issue(s): ${healthCheck.summary}`);
         this.emitParallel({
           type: 'parallel:health-check',
           timestamp: new Date().toISOString(),
@@ -314,12 +315,14 @@ export class ParallelExecutor {
         // Apply auto-fixes: reset deadlocked tasks to 'open' for task graph analysis
         const allResetTaskIds = [...healthCheck.fixedTaskIds, ...healthCheck.cascadedResetTaskIds];
         if (allResetTaskIds.length > 0) {
+          console.log(`[parallel] Resetting ${allResetTaskIds.length} deadlocked/blocked task(s) to open: ${allResetTaskIds.join(', ')}`);
           tasks = applyHealthFixes(tasks, healthCheck);
 
           // Persist the status fixes to the tracker (both fixed and cascaded tasks)
           for (const taskId of allResetTaskIds) {
             try {
               await this.tracker.updateTaskStatus(taskId, 'open');
+              console.log(`[parallel] Successfully reset task ${taskId} to 'open'`);
             } catch (err) {
               console.error(`[parallel] Failed to reset task ${taskId} to open:`, err);
             }
@@ -358,6 +361,7 @@ export class ParallelExecutor {
 
       // Analyze task graph
       this.taskGraph = analyzeTaskGraph(tasks);
+      console.log(`[parallel] Task graph analysis: ${this.taskGraph.groups.length} group(s), ${this.taskGraph.actionableTaskCount} actionable task(s), cyclic=${this.taskGraph.cyclicTaskIds.length}`);
 
       if (!shouldRunParallel(this.taskGraph)) {
         // In auto-poll mode, wait for more tasks instead of exiting immediately
@@ -835,6 +839,7 @@ export class ParallelExecutor {
     group: { index: number; tasks: TrackerTask[]; depth: number },
     groupIndex: number
   ): Promise<void> {
+    console.log(`[parallel] executeGroup: group ${groupIndex}, ${group.tasks.length} task(s), depth ${group.depth}`);
     this.status = 'executing';
     const totalGroups = this.taskGraph!.groups.length;
 
@@ -1008,6 +1013,7 @@ export class ParallelExecutor {
    * Execute a batch of tasks in parallel using workers.
    */
   private async executeBatch(tasks: TrackerTask[]): Promise<WorkerResult[]> {
+    console.log(`[parallel] executeBatch: starting with ${tasks.length} task(s), maxWorkers=${this.config.maxWorkers}`);
     this.activeWorkers = [];
 
     // Create workers
@@ -1212,6 +1218,7 @@ export class ParallelExecutor {
    * Split tasks into batches of maxWorkers size.
    */
   private batchTasks(tasks: TrackerTask[]): TrackerTask[][] {
+    console.log(`[parallel] batchTasks: ${tasks.length} task(s) to batch, maxWorkers=${this.config.maxWorkers}`);
     const batches: TrackerTask[][] = [];
     for (let i = 0; i < tasks.length; i += this.config.maxWorkers) {
       batches.push(tasks.slice(i, i + this.config.maxWorkers));
