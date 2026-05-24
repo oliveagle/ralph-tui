@@ -14,9 +14,9 @@ export interface RaloopOptions {
   help?: boolean;
 }
 
-import { startPatrol, PatrolConfig } from './patrol.js';
+import { executePatrolCommand } from './patrol.js';
 
-const DEFAULT_INTERVAL_MS = 5000;
+const DEFAULT_INTERVAL_MS = 300_000; // 5 minutes
 
 /**
  * Parse raloop command arguments.
