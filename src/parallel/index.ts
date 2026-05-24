@@ -773,6 +773,8 @@ export class ParallelExecutor {
       }
 
       // Merge failed (non-conflict)
+      // Reset task to open so it can be retried in the next session
+      await this.resetTaskToOpen(workerResult.task.id);
       // Cleanup worktree even on merge failure
       await this.worktreeManager.cleanupByBranch(workerResult.branchName);
       return { success: false, hadConflicts: false, mergeResult };
@@ -1040,6 +1042,12 @@ export class ParallelExecutor {
         // Task is blocked by dependencies or claim failed — release worktree and skip
         this.worktreeManager.release(`worker-${workerId}`);
         blockedTasks.push(task);
+        // Reset blocked task back to open so the next health check can handle it properly
+        try {
+          await this.tracker.updateTaskStatus(task.id, 'open');
+        } catch (err) {
+          console.error(`[parallel] Failed to reset blocked task ${task.id} to open:`, err);
+        }
         continue;
       }
       claimedTasks.push(task);
