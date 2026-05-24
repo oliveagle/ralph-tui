@@ -97,3 +97,8 @@ export {
   parseRemoteArgs,
   printRemoteHelp,
 } from './remote.js';
+
+export {
+  executeRaloopCommand,
+  printRaloopHelp,
+} from './raloop.js';
