@@ -373,13 +373,6 @@ export class ConflictResolver {
   private tryAutoResolve(conflict: FileConflict): string | null {
     const filePath = conflict.filePath;
 
-    // Binary files: take theirs (worker's build artifact).
-    // Binary content can't be meaningfully merged, and gitignore should prevent
-    // tracking — but if it's already tracked, prefer the worker's version.
-    if (this.isBinaryContent(conflict.theirsContent)) {
-      return conflict.theirsContent;
-    }
-
     // For .beads/ files, use special handling
     if (filePath.startsWith('.beads/') || filePath.includes('/.beads/')) {
       // .beads/issues.jsonl: Merge all unique JSONL entries from both versions
@@ -387,7 +380,9 @@ export class ConflictResolver {
         return this.mergeJsonl(conflict.oursContent, conflict.theirsContent, conflict.baseContent);
       }
 
-      // .beads/beads.db: SQLite database - use ours (worktree loses)
+      // .beads/beads.db: SQLite database - skip merge, take ours (worktree loses)
+      // This is a binary database file that cannot be meaningfully merged.
+      // When tracked in git, prefer main branch version to avoid corruption.
       if (filePath.endsWith('.beads/beads.db') || filePath.endsWith('beads.db')) {
         return conflict.oursContent;
       }
@@ -399,6 +394,13 @@ export class ConflictResolver {
     // For .ralph-tui/ files, use ours version (local state)
     if (filePath.startsWith('.ralph-tui/') || filePath.includes('/.ralph-tui/')) {
       return conflict.oursContent;
+    }
+
+    // Binary files: take theirs (worker's build artifact).
+    // Binary content can't be meaningfully merged, and gitignore should prevent
+    // tracking — but if it's already tracked, prefer the worker's version.
+    if (this.isBinaryContent(conflict.theirsContent)) {
+      return conflict.theirsContent;
     }
 
     // For all other files, AI is needed for semantic merging

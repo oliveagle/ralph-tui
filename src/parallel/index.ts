@@ -1027,9 +1027,13 @@ export class ParallelExecutor {
         }
       });
 
+      // Add worker to activeWorkers BEFORE initialize so that worker:created event
+      // handler can see it in getWorkerStates() (fixes TUI showing fewer running
+      // workers than expected during worker creation)
+      this.activeWorkers.push(worker);
+
       // Initialize the worker engine with the shared tracker
       await worker.initialize(this.baseConfig, this.tracker);
-      this.activeWorkers.push(worker);
     }
 
     // If no tasks were claimed, return empty results

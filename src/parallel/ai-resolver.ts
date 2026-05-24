@@ -63,6 +63,11 @@ export function createAiResolver(config: RalphConfig): AiResolverCallback {
   const maxAttempts = config.conflictResolution?.qualityGate?.maxAttempts ?? 3;
 
   return async (conflict, taskContext) => {
+    // Skip beads.db - it's a binary SQLite database that cannot be merged
+    if (conflict.filePath.endsWith('.beads/beads.db') || conflict.filePath.endsWith('beads.db')) {
+      return conflict.oursContent;
+    }
+
     // Skip binary files - cannot be meaningfully resolved by AI
     if (isBinaryContent(conflict.oursContent) || isBinaryContent(conflict.theirsContent)) {
       return conflict.theirsContent || conflict.oursContent;
