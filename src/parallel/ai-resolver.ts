@@ -8,6 +8,7 @@ import { getAgentRegistry } from '../plugins/agents/registry.js';
 import type { RalphConfig } from '../config/types.js';
 import type { FileConflict } from './types.js';
 import type { AiResolverCallback } from './conflict-resolver.js';
+import { runQualityGate } from './quality-gate.js';
 
 /** Default timeout for AI resolution per file (2 minutes) */
 const DEFAULT_TIMEOUT_MS = 120000;
@@ -47,6 +48,8 @@ function mergeContentLines(ours: string, theirs: string): string {
  */
 export function createAiResolver(config: RalphConfig): AiResolverCallback {
   const timeout = config.conflictResolution?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const qualityEnabled = config.conflictResolution?.qualityGate?.enabled ?? true;
+  const maxAttempts = config.conflictResolution?.qualityGate?.maxAttempts ?? 3;
 
   return async (conflict, taskContext) => {
     // Fast-path: Check for trivial cases before spawning agent
@@ -55,29 +58,60 @@ export function createAiResolver(config: RalphConfig): AiResolverCallback {
       return fastResult;
     }
 
-    // Spawn agent for complex resolution
-    try {
-      const agentRegistry = getAgentRegistry();
-      const agent = await agentRegistry.getInstance(config.agent);
+    // AI resolution with quality gate self-correction loop
+    let currentContent: string | null = null;
+    let attemptErrors: string[] = [];
 
-      const prompt = buildConflictPrompt(conflict, taskContext);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Build prompt with error feedback if this is a retry
+      const prompt = buildConflictPrompt(conflict, taskContext, attemptErrors);
 
-      const handle = agent.execute(prompt, [], {
-        cwd: config.cwd,
-        timeout,
-      });
+      try {
+        const agentRegistry = getAgentRegistry();
+        const agent = await agentRegistry.getInstance(config.agent);
 
-      const result = await handle.promise;
+        const handle = agent.execute(prompt, [], {
+          cwd: config.cwd,
+          timeout,
+        });
 
-      if (result.status !== 'completed' || result.exitCode !== 0) {
-        return null;
+        const result = await handle.promise;
+
+        if (result.status !== 'completed' || result.exitCode !== 0) {
+          attemptErrors.push(`Attempt ${attempt + 1}: Agent execution failed`);
+          continue;
+        }
+
+        const resolvedContent = extractResolvedContent(result.stdout);
+        if (resolvedContent === null) {
+          attemptErrors.push(`Attempt ${attempt + 1}: No content returned`);
+          continue;
+        }
+
+        // Quality gate validation
+        if (qualityEnabled) {
+          const qgResult = await runQualityGate(conflict.filePath, resolvedContent, {
+            cwd: config.cwd,
+            timeoutMs: timeout,
+          });
+
+          if (qgResult.passed) {
+            currentContent = resolvedContent;
+            break;
+          } else {
+            attemptErrors = qgResult.errors;
+            // Continue to next attempt with error feedback
+          }
+        } else {
+          currentContent = resolvedContent;
+          break;
+        }
+      } catch (err) {
+        attemptErrors.push(`Attempt ${attempt + 1}: ${(err as Error).message}`);
       }
-
-      return extractResolvedContent(result.stdout);
-    } catch {
-      // Agent execution failed - return null to signal failure
-      return null;
     }
+
+    return currentContent;
   };
 }
 
@@ -126,8 +160,20 @@ export function tryFastPathResolution(conflict: FileConflict): string | null {
  */
 export function buildConflictPrompt(
   conflict: FileConflict,
-  ctx: { taskId: string; taskTitle: string }
+  ctx: { taskId: string; taskTitle: string },
+  previousErrors: string[] = []
 ): string {
+  let feedbackSection = '';
+  if (previousErrors.length > 0) {
+    feedbackSection = `
+
+## Previous Attempt Failed
+The following quality checks failed:
+${previousErrors.map((e) => `- ${e}`).join('\n')}
+
+Please provide a corrected resolution that fixes these issues while still COMBINING ALL CONTENT from both branches.`;
+  }
+
   return `You are resolving a git merge conflict. Output ONLY the resolved file content.
 
 ## Context
@@ -156,6 +202,7 @@ ${conflict.theirsContent}
 4. For file creation/modification: merge ALL unique content from both sides
 5. When both sides modified the same lines: apply intelligent judgment based on semantic meaning
 6. NEVER discard content from one side in favor of the other unless they are truly mutually exclusive
+${feedbackSection}
 
 OUTPUT ONLY THE RESOLVED FILE CONTENT. No explanation, no markdown code fences.`;
 }

@@ -158,6 +158,14 @@ export interface ConflictResolutionConfig {
 
   /** Maximum files to attempt AI resolution on per conflict (default: 10) */
   maxFiles?: number;
+
+  /** Quality gate configuration for validating merged content */
+  qualityGate?: {
+    /** Enable quality gate validation (default: true) */
+    enabled?: boolean;
+    /** Max AI retry attempts if quality gate fails (default: 3) */
+    maxAttempts?: number;
+  };
 }
 
 /**
