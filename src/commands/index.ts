@@ -102,3 +102,7 @@ export {
   executeRaloopCommand,
   printRaloopHelp,
 } from './raloop.js';
+
+export {
+  executePatrolCommand,
+} from './patrol.js';

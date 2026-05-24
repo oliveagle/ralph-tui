@@ -14,6 +14,8 @@ export interface RaloopOptions {
   help?: boolean;
 }
 
+import { startPatrol, PatrolConfig } from './patrol.js';
+
 const DEFAULT_INTERVAL_MS = 5000;
 
 /**
@@ -121,6 +123,13 @@ export async function executeRaloopCommand(args: string[]): Promise<void> {
   const maxIterations = options.count;
   const commands = options.commands;
 
+  // If --patrol mode is enabled via daemon flag or explicit detection
+  if (options.daemon || commands.length === 0) {
+    // Patrol mode: integrate with patrol.ts
+    await executePatrolMode(intervalMs);
+    return;
+  }
+
   console.log('');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log('                     Ralph Patrol Loop Started                  ');
@@ -193,6 +202,58 @@ export async function executeRaloopCommand(args: string[]): Promise<void> {
   }
 
   console.log('Raloop completed.');
+}
+
+/**
+ * Execute raloop in patrol mode using patrol.ts integration.
+ */
+async function executePatrolMode(intervalMs: number): Promise<void> {
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('                    Ralph Patrol Mode Started                  ');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('');
+  console.log(`  Interval:   ${intervalMs}ms (${intervalMs / 1000}s)`);
+  console.log('  Mode:       Beads task monitoring');
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════════');
+  console.log('');
+
+  const { registerBuiltinAgents } = await import('../plugins/agents/builtin/index.js');
+  const { registerBuiltinTrackers } = await import('../plugins/trackers/builtin/index.js');
+  const { getTrackerRegistry } = await import('../plugins/trackers/registry.js');
+  const { getAgentRegistry } = await import('../plugins/agents/registry.js');
+  const { buildConfig } = await import('../config/index.js');
+  const { DeadlockResolver } = await import('../parallel/deadlock-resolver.js');
+
+  // Initialize plugins (same pattern as run.tsx)
+  registerBuiltinAgents();
+  registerBuiltinTrackers();
+
+  const agentRegistry = getAgentRegistry();
+  const trackerRegistry = getTrackerRegistry();
+  await Promise.all([agentRegistry.initialize(), trackerRegistry.initialize()]);
+
+  const config = await buildConfig({});
+  if (!config) {
+    console.error('[raloop] Failed to build configuration');
+    process.exit(1);
+  }
+  const tracker = await trackerRegistry.getInstance(config.tracker);
+
+  const deadlockResolver = new DeadlockResolver(
+    { cwd: process.cwd(), sessionId: 'raloop', worktreeDir: '.ralph-tui/worktrees' },
+    tracker,
+    config
+  );
+
+  const patrolConfig: PatrolConfig = {
+    intervalSeconds: Math.floor(intervalMs / 1000),
+    useAiResolver: true,
+    stuckThresholdMs: 10 * 60_000,
+  };
+
+  await startPatrol(tracker, deadlockResolver, patrolConfig);
 }
 
 /**

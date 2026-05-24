@@ -3482,7 +3482,7 @@ async function runHeadless(
   }
 
   // Main loop: restart engine when it completes (for auto-loop mode)
-  // eslint-disable-next-line no-constant-condition
+   
   while (true) {
     // Start the engine
     await engine.start();
@@ -4528,7 +4528,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         process.on('SIGTERM', handleParallelSignal);
 
         // Main parallel execution loop (handles deadlock restarts)
-        // eslint-disable-next-line no-constant-condition
+         
         while (true) {
           // Reset for new execution
           parallelExecutor.reset();

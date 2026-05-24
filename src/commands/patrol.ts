@@ -1,7 +1,7 @@
 /**
  * ABOUTME: Patrol agent for ralph-tui that periodically checks bead task status.
  *
- * Runs on a fixed interval (default 30 seconds) and:
+ * Runs on a fixed interval (default 300s / 5 minutes) and:
  * 1. Checks all bead task statuses
  * 2. Detects stuck tasks (in_progress with no progress)
  * 3. Detects dependency issues (tasks blocked by uncompleted dependencies)
@@ -9,7 +9,7 @@
  * 5. Calls AI agent to analyze and fix issues
  * 6. Records patrol findings to .ralph-tui/patrol/
  *
- * Usage: raloop --patrol [--patrol-interval 30]
+ * Usage: raloop --patrol [--patrol-interval 300]
  */
 
 import * as fs from 'node:fs';
@@ -44,7 +44,7 @@ export interface PatrolResult {
 
 /** Patrol configuration */
 export interface PatrolConfig {
-  /** Patrol interval in seconds (default 30) */
+  /** Patrol interval in seconds (default 300 = 5 minutes) */
   intervalSeconds: number;
   /** Whether to use AI agent for resolution (default true) */
   useAiResolver: boolean;
@@ -283,6 +283,10 @@ export async function executePatrolCommand(): Promise<void> {
   await Promise.all([agentRegistry.initialize(), trackerRegistry.initialize()]);
 
   const config = await buildConfig({});
+  if (!config) {
+    console.error('[patrol] Failed to build configuration');
+    process.exit(1);
+  }
   const tracker = await trackerRegistry.getInstance(config.tracker);
 
   const deadlockResolver = new DeadlockResolver(
