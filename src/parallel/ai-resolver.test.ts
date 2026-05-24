@@ -103,6 +103,58 @@ describe('tryFastPathResolution', () => {
     // Both empty but identical, so returns ours (empty string)
     expect(result).toBe('');
   });
+
+  test('merges content when base is empty and both sides have content', () => {
+    const conflict: FileConflict = {
+      filePath: 'readme.md',
+      oursContent: 'Line 1\nLine 2\nLine 3',
+      theirsContent: 'Line 4\nLine 5\nLine 6',
+      baseContent: '',
+      conflictMarkers: '',
+    };
+
+    const result = tryFastPathResolution(conflict);
+    expect(result).toBe('Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6');
+  });
+
+  test('deduplicates identical lines from both sides', () => {
+    const conflict: FileConflict = {
+      filePath: 'readme.md',
+      oursContent: '# Title\nLine A\nLine B',
+      theirsContent: 'Line A\nLine B\nLine C',
+      baseContent: '',
+      conflictMarkers: '',
+    };
+
+    const result = tryFastPathResolution(conflict);
+    expect(result).toBe('# Title\nLine A\nLine B\nLine C');
+  });
+
+  test('handles trailing newlines correctly', () => {
+    const conflict: FileConflict = {
+      filePath: 'test.md',
+      oursContent: 'Line 1\nLine 2\n',
+      theirsContent: 'Line 3\nLine 4\n',
+      baseContent: '',
+      conflictMarkers: '',
+    };
+
+    const result = tryFastPathResolution(conflict);
+    expect(result).toBe('Line 1\nLine 2\nLine 3\nLine 4\n');
+  });
+
+  test('returns null when base has content and both sides differ', () => {
+    const conflict: FileConflict = {
+      filePath: 'existing-file.md',
+      oursContent: 'Modified version A',
+      theirsContent: 'Modified version B',
+      baseContent: 'Original content',
+      conflictMarkers: '',
+    };
+
+    const result = tryFastPathResolution(conflict);
+    expect(result).toBeNull();
+  });
 });
 
 describe('buildConflictPrompt', () => {
@@ -177,7 +229,7 @@ describe('buildConflictPrompt', () => {
     expect(prompt).toContain('(file did not exist)');
   });
 
-  test('includes instructions to output only file content', () => {
+  test('includes instructions to combine all content from both branches', () => {
     const conflict: FileConflict = {
       filePath: 'test.ts',
       oursContent: 'x',
@@ -191,9 +243,9 @@ describe('buildConflictPrompt', () => {
       taskTitle: 'Test',
     });
 
-    expect(prompt).toContain('OUTPUT ONLY THE RESOLVED FILE CONTENT');
-    expect(prompt).toContain('No explanation');
-    expect(prompt).toContain('no markdown code fences');
+    expect(prompt).toContain('COMBINE ALL CONTENT');
+    expect(prompt).toContain('CRITICAL');
+    expect(prompt).not.toContain('prefer the worker\'s changes');
   });
 });
 

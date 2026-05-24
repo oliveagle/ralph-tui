@@ -13,6 +13,32 @@ import type { AiResolverCallback } from './conflict-resolver.js';
 const DEFAULT_TIMEOUT_MS = 120000;
 
 /**
+ * Merge content from two versions by combining unique lines.
+ * Used when parallel workers created/modified a file independently.
+ * Preserves line order from 'ours' first, then adds unique lines from 'theirs'.
+ */
+function mergeContentLines(ours: string, theirs: string): string {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  const addUniqueLines = (content: string) => {
+    for (const line of content.split('\n')) {
+      const trimmed = line.trimEnd();
+      if (trimmed === '' || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      result.push(line);
+    }
+  };
+
+  addUniqueLines(ours);
+  addUniqueLines(theirs);
+
+  const combined = result.join('\n');
+  const hasTrailingNewline = ours.endsWith('\n') || theirs.endsWith('\n');
+  return hasTrailingNewline && combined !== '' ? combined + '\n' : combined;
+}
+
+/**
  * Creates an AI resolver callback that spawns the session's configured agent.
  * The callback is injected into ConflictResolver via ParallelExecutor.setAiResolver().
  *
@@ -63,6 +89,7 @@ export function createAiResolver(config: RalphConfig): AiResolverCallback {
  * @returns Resolved content if trivial case detected, null if AI is needed
  */
 export function tryFastPathResolution(conflict: FileConflict): string | null {
+  const baseEmpty = conflict.baseContent.trim() === '';
   const oursEmpty = conflict.oursContent.trim() === '';
   const theirsEmpty = conflict.theirsContent.trim() === '';
 
@@ -79,7 +106,13 @@ export function tryFastPathResolution(conflict: FileConflict): string | null {
     return conflict.oursContent;
   }
 
-  // Need AI for complex cases
+  // Base is empty and both sides have content → merge all unique lines
+  // This handles parallel workers independently creating/modifying a file
+  if (baseEmpty && !oursEmpty && !theirsEmpty) {
+    return mergeContentLines(conflict.oursContent, conflict.theirsContent);
+  }
+
+  // For all other cases, let AI handle it with improved instructions
   return null;
 }
 
@@ -117,10 +150,12 @@ ${conflict.theirsContent}
 \`\`\`
 
 ## Instructions
-1. Merge intelligently - keep changes from both branches where they don't conflict
+1. CRITICAL: COMBINE ALL CONTENT from both branches - they represent parallel work that should be merged together
 2. The worker was implementing "${ctx.taskTitle}" - preserve their functional changes
 3. Keep main branch updates (formatting, unrelated fixes) where possible
-4. If in doubt, prefer the worker's changes since they implement the requested task
+4. For file creation/modification: merge ALL unique content from both sides
+5. When both sides modified the same lines: apply intelligent judgment based on semantic meaning
+6. NEVER discard content from one side in favor of the other unless they are truly mutually exclusive
 
 OUTPUT ONLY THE RESOLVED FILE CONTENT. No explanation, no markdown code fences.`;
 }
