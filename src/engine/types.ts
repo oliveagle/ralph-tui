@@ -245,7 +245,8 @@ export type EngineEventType =
   | 'parallel:group-started'
   | 'parallel:group-completed'
   | 'parallel:completed'
-  | 'parallel:failed';
+  | 'parallel:failed'
+  | 'parallel:health-check';
 
 /**
  * Base engine event

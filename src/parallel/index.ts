@@ -10,6 +10,7 @@ import type { RalphConfig } from '../config/types.js';
 import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
 import type { EngineEventListener } from '../engine/types.js';
 import { analyzeTaskGraph, shouldRunParallel } from './task-graph.js';
+import { checkTaskHealth, applyHealthFixes } from './task-health-checker.js';
 import { WorktreeManager } from './worktree-manager.js';
 import { MergeEngine } from './merge-engine.js';
 import { ConflictResolver, type AiResolverCallback } from './conflict-resolver.js';
@@ -296,6 +297,35 @@ export class ParallelExecutor {
       // Filter out epics - they cannot be claimed/processed by workers
       tasks = tasks.filter((t) => t.type !== 'epic');
 
+      // Check task health for deadlocks and orphaned tasks
+      const healthCheck = checkTaskHealth(tasks, {
+        autoFixDeadlocks: true,
+        autoFixOrphaned: true,
+      });
+
+      if (healthCheck.issues.length > 0) {
+        this.emitParallel({
+          type: 'parallel:health-check',
+          timestamp: new Date().toISOString(),
+          sessionId: this.sessionId,
+          healthCheck,
+        });
+
+        // Apply auto-fixes: reset deadlocked tasks to 'open' for task graph analysis
+        if (healthCheck.fixedTaskIds.length > 0) {
+          tasks = applyHealthFixes(tasks, healthCheck);
+
+          // Persist the status fixes to the tracker
+          for (const taskId of healthCheck.fixedTaskIds) {
+            try {
+              await this.tracker.updateTaskStatus(taskId, 'open');
+            } catch (err) {
+              console.error(`[parallel] Failed to reset task ${taskId} to open:`, err);
+            }
+          }
+        }
+      }
+
       // Auto-poll mode: wait for tasks instead of exiting immediately
       if (tasks.length === 0) {
         if (this.config.autoPoll) {
@@ -404,6 +434,9 @@ export class ParallelExecutor {
         await this.waitWhilePaused();
         if (this.shouldStop) break;
 
+        // Health check before each group to catch new deadlocks
+        await this.runHealthCheckAndFix();
+
         this.currentGroupIndex = i;
         const group = this.taskGraph.groups[i];
 
@@ -415,6 +448,9 @@ export class ParallelExecutor {
       while (!this.shouldStop) {
         await this.waitWhilePaused();
         if (this.shouldStop) break;
+
+        // Health check at the start of each continuous iteration
+        await this.runHealthCheckAndFix();
 
         // Check if there are new tasks available
         const newTasks = await this.tracker.getTasks({
@@ -492,6 +528,9 @@ export class ParallelExecutor {
           if (this.shouldStop) break;
           await this.waitWhilePaused();
           if (this.shouldStop) break;
+
+          // Health check before each group to catch new deadlocks
+          await this.runHealthCheckAndFix();
 
           this.currentGroupIndex = i;
           const group = this.taskGraph.groups[i];
@@ -1405,6 +1444,55 @@ export class ParallelExecutor {
       } catch {
         // Don't let listener errors break the executor
       }
+    }
+  }
+
+  /**
+   * Run health check on all tasks and auto-fix any deadlocks or orphaned tasks.
+   * Called before each group execution and at the start of continuous mode loops.
+   */
+  private async runHealthCheckAndFix(): Promise<void> {
+    try {
+      const tasks = await this.tracker.getTasks({
+        status: ['open', 'in_progress'],
+      });
+
+      // Apply task ID filter if configured
+      let filteredTasks = tasks;
+      if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+        const filteredIdSet = new Set(this.config.filteredTaskIds);
+        filteredTasks = tasks.filter((t) => filteredIdSet.has(t.id));
+      }
+
+      // Skip epics
+      filteredTasks = filteredTasks.filter((t) => t.type !== 'epic');
+
+      // Run health check
+      const healthCheck = checkTaskHealth(filteredTasks, {
+        autoFixDeadlocks: true,
+        autoFixOrphaned: true,
+      });
+
+      if (healthCheck.issues.length > 0) {
+        this.emitParallel({
+          type: 'parallel:health-check',
+          timestamp: new Date().toISOString(),
+          sessionId: this.sessionId,
+          healthCheck,
+        });
+
+        // Persist fixes to tracker
+        for (const taskId of healthCheck.fixedTaskIds) {
+          try {
+            await this.tracker.updateTaskStatus(taskId, 'open');
+          } catch (err) {
+            console.error(`[parallel] Failed to reset task ${taskId} to open:`, err);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[parallel] Health check failed:', err);
+      // Don't fail the whole execution due to health check issues
     }
   }
 }

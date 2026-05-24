@@ -14,6 +14,7 @@ import type {
   ConflictResolutionResult,
   ParallelGroup,
   TaskGraphAnalysis,
+  HealthCheckResult,
 } from './types.js';
 
 // ─── Parallel Event Type Union ─────────────────────────────────────────────────
@@ -47,7 +48,8 @@ export type ParallelEventType =
   | 'parallel:group-started'
   | 'parallel:group-completed'
   | 'parallel:completed'
-  | 'parallel:failed';
+  | 'parallel:failed'
+  | 'parallel:health-check';
 
 // ─── Worker Events ─────────────────────────────────────────────────────────────
 
@@ -261,6 +263,13 @@ export interface ParallelFailedEvent extends EngineEventBase {
   tasksCompletedBeforeFailure: number;
 }
 
+/** Emitted when task health check detects and fixes issues before execution. */
+export interface ParallelHealthCheckEvent extends EngineEventBase {
+  type: 'parallel:health-check';
+  sessionId: string;
+  healthCheck: HealthCheckResult;
+}
+
 // ─── Union of All Parallel Events ──────────────────────────────────────────────
 
 /**
@@ -292,7 +301,8 @@ export type ParallelEvent =
   | ParallelGroupStartedEvent
   | ParallelGroupCompletedEvent
   | ParallelCompletedEvent
-  | ParallelFailedEvent;
+  | ParallelFailedEvent
+  | ParallelHealthCheckEvent;
 
 /**
  * Listener function for parallel events.

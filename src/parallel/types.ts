@@ -543,6 +543,43 @@ export interface TaskGraphAnalysis {
   recommendParallel: boolean;
 }
 
+export type HealthIssueType =
+  | 'deadlock'
+  | 'orphaned'
+  | 'missing_dependency'
+  | 'circular_dependency';
+
+/** Severity level of a task health issue */
+export type HealthSeverity = 'error' | 'warning' | 'info';
+
+/** A single health issue found during analysis */
+export interface HealthIssue {
+  /** Issue type */
+  type: HealthIssueType;
+  /** Severity level */
+  severity: HealthSeverity;
+  /** Task ID that has the issue */
+  taskId: string;
+  /** Human-readable description */
+  message: string;
+  /** Suggested fix (auto-fixable issues) */
+  suggestedFix?: string;
+  /** Related task IDs (e.g., the dependency causing the deadlock) */
+  relatedTaskIds?: string[];
+}
+
+/** Result of a task health check */
+export interface HealthCheckResult {
+  /** Whether the overall task set is healthy */
+  healthy: boolean;
+  /** Issues found */
+  issues: HealthIssue[];
+  /** Tasks that were auto-fixed during the check */
+  fixedTaskIds: string[];
+  /** Summary message */
+  summary: string;
+}
+
 // ─── Smart Parallelism Heuristics ──────────────────────────────────────────────
 
 /**
