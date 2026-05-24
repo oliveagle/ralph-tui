@@ -4453,12 +4453,28 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           // Reset any in_progress tasks back to open
           const activeTasks = getActiveTasks(persistedState);
           if (activeTasks.length > 0) {
-            writeLog(`[${time}] [INFO] [parallel] Resetting ${activeTasks.length} in_progress task(s) to open...\n`);
+            writeLog(`[${time}] [INFO] [parallel] Checking ${activeTasks.length} tracked task(s) for stale in_progress status...\n`);
+
+            // Only reset tasks that are actually still in_progress
+            // (tasks that were completed by agents are already closed and should not be reopened)
             for (const taskId of activeTasks) {
               try {
-                await tracker.updateTaskStatus(taskId, 'open');
-              } catch {
-                // Best effort reset
+                const task = await tracker.getTask(taskId);
+                // Only reset if the task is actually in_progress (completed tasks should stay closed)
+                if (task && task.status === 'in_progress') {
+                  writeLog(`[${time}] [INFO] [parallel] Resetting stale in_progress task ${taskId} to open\n`);
+                  await tracker.updateTaskStatus(taskId, 'open');
+                } else if (task) {
+                  writeLog(`[${time}] [INFO] [parallel] Task ${taskId} is ${task.status}, skipping reset\n`);
+                }
+              } catch (err) {
+                // Best effort reset - if we can't check status, reset it
+                writeLog(`[${time}] [WARN] [parallel] Failed to check task ${taskId} status, resetting anyway: ${err}\n`);
+                try {
+                  await tracker.updateTaskStatus(taskId, 'open');
+                } catch {
+                  // Ignore reset failures
+                }
               }
             }
             persistedState = clearActiveTasks(persistedState);

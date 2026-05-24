@@ -888,9 +888,12 @@ export class ParallelExecutor {
       for (const result of results) {
         if (this.shouldStop) {
           // Stop was requested mid-batch: do not merge partial work, reopen task instead.
+          // But only reset if the worker didn't complete it (taskCompleted=true means agent already closed it).
           groupTasksFailed++;
           this.totalTasksFailed++;
-          await this.resetTaskToOpen(result.task.id);
+          if (!result.taskCompleted) {
+            await this.resetTaskToOpen(result.task.id);
+          }
           continue;
         }
 
@@ -971,7 +974,10 @@ export class ParallelExecutor {
               operation.id,
               'Parallel execution stopped before conflict resolution'
             );
-            await this.resetTaskToOpen(workerResult.task.id);
+            // Only reset if the worker didn't complete it
+            if (!workerResult.taskCompleted) {
+              await this.resetTaskToOpen(workerResult.task.id);
+            }
             continue;
           }
 
@@ -1173,12 +1179,20 @@ export class ParallelExecutor {
     if (operation?.status === 'conflicted') {
       this.markConflictOperationRolledBack(
         operation.id,
-        'Conflict resolution failed; task reset to open'
+        result.taskCompleted
+          ? 'Conflict resolution failed but task was already completed by agent'
+          : 'Conflict resolution failed; task reset to open'
       );
     }
 
     await this.mergeProgressFile(result);
-    await this.resetTaskToOpen(taskId);
+
+    // Only reset task status if the worker didn't complete it.
+    // If taskCompleted=true, the agent already closed the task via br close,
+    // and resetting it would undo the completion.
+    if (!result.taskCompleted) {
+      await this.resetTaskToOpen(taskId);
+    }
     return shouldRequeue;
   }
 
