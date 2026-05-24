@@ -312,11 +312,12 @@ export class ParallelExecutor {
         });
 
         // Apply auto-fixes: reset deadlocked tasks to 'open' for task graph analysis
-        if (healthCheck.fixedTaskIds.length > 0) {
+        const allResetTaskIds = [...healthCheck.fixedTaskIds, ...healthCheck.cascadedResetTaskIds];
+        if (allResetTaskIds.length > 0) {
           tasks = applyHealthFixes(tasks, healthCheck);
 
-          // Persist the status fixes to the tracker
-          for (const taskId of healthCheck.fixedTaskIds) {
+          // Persist the status fixes to the tracker (both fixed and cascaded tasks)
+          for (const taskId of allResetTaskIds) {
             try {
               await this.tracker.updateTaskStatus(taskId, 'open');
             } catch (err) {
@@ -1158,10 +1159,42 @@ export class ParallelExecutor {
   /**
    * Best-effort reset of a task status to open.
    * Prevents tasks from remaining stuck in in_progress after cancellation/failure.
+   * Also cascades the reset to any in_progress tasks that depend on this task.
    */
   private async resetTaskToOpen(taskId: string): Promise<void> {
     try {
       await this.tracker.updateTaskStatus(taskId, 'open');
+
+      // Cascading reset: find and reset all in_progress tasks that depend on this task
+      const tasks = await this.tracker.getTasks({
+        status: ['in_progress'],
+      });
+
+      for (const task of tasks) {
+        // Check if this task depends on the reset task
+        let dependsOnResetTask = false;
+
+        if (task.dependsOn?.includes(taskId)) {
+          dependsOnResetTask = true;
+        }
+
+        // Check blocks relationship
+        if (!dependsOnResetTask) {
+          const resetTask = await this.tracker.getTask(taskId);
+          if (resetTask?.blocks?.includes(task.id)) {
+            dependsOnResetTask = true;
+          }
+        }
+
+        if (dependsOnResetTask) {
+          try {
+            await this.tracker.updateTaskStatus(task.id, 'open');
+            console.log(`[parallel] Cascaded reset: task ${task.id} depends on reset task ${taskId}`);
+          } catch (err) {
+            console.error(`[parallel] Failed to cascade reset task ${task.id}:`, err);
+          }
+        }
+      }
     } catch {
       // Best effort
     }
@@ -1481,8 +1514,9 @@ export class ParallelExecutor {
           healthCheck,
         });
 
-        // Persist fixes to tracker
-        for (const taskId of healthCheck.fixedTaskIds) {
+        // Persist fixes to tracker (both fixed and cascaded tasks)
+        const allResetTaskIds = [...healthCheck.fixedTaskIds, ...healthCheck.cascadedResetTaskIds];
+        for (const taskId of allResetTaskIds) {
           try {
             await this.tracker.updateTaskStatus(taskId, 'open');
           } catch (err) {

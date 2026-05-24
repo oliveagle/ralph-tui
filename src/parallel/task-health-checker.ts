@@ -54,6 +54,9 @@ export interface HealthCheckResult {
   /** Tasks that were auto-fixed during the check */
   fixedTaskIds: string[];
 
+  /** Tasks that depend on fixed tasks (also need reset) - cascading reset */
+  cascadedResetTaskIds: string[];
+
   /** Summary message */
   summary: string;
 }
@@ -136,14 +139,63 @@ export function checkTaskHealth(
     }
   }
 
+  // Cascading reset: find all in_progress tasks that depend on fixed tasks
+  // These tasks are now deadlocked because their dependency was reset
+  const cascadedResetTaskIds: string[] = [];
+  for (const fixedTaskId of fixedTaskIds) {
+    findDependentTasks(fixedTaskId, taskMap, cascadedResetTaskIds);
+  }
+
   const healthy = issues.filter((i) => i.severity === 'error').length === 0;
 
   return {
     healthy,
     issues,
     fixedTaskIds,
-    summary: buildSummary(issues, fixedTaskIds),
+    cascadedResetTaskIds,
+    summary: buildSummary(issues, fixedTaskIds, cascadedResetTaskIds),
   };
+}
+
+/**
+ * Find all in_progress tasks that depend on the given task (directly or indirectly).
+ * These tasks need to be reset because their dependency was reset.
+ */
+function findDependentTasks(
+  taskId: string,
+  taskMap: Map<string, TrackerTask>,
+  result: string[],
+  visited = new Set<string>()
+): void {
+  if (visited.has(taskId)) return;
+  visited.add(taskId);
+
+  for (const [id, task] of taskMap) {
+    if (task.status !== 'in_progress') continue;
+    if (result.includes(id)) continue;
+
+    // Check if this task depends on the target task
+    let dependsOnTarget = false;
+
+    // Check dependsOn
+    if (task.dependsOn?.includes(taskId)) {
+      dependsOnTarget = true;
+    }
+
+    // Check blocks (reverse relationship)
+    for (const [otherId, other] of taskMap) {
+      if (other.blocks?.includes(taskId) && otherId === id) {
+        dependsOnTarget = true;
+        break;
+      }
+    }
+
+    if (dependsOnTarget) {
+      result.push(id);
+      // Recursively find tasks that depend on this one
+      findDependentTasks(id, taskMap, result, visited);
+    }
+  }
 }
 
 /**
@@ -159,9 +211,14 @@ export function applyHealthFixes(
   tasks: TrackerTask[],
   healthResult: HealthCheckResult
 ): TrackerTask[] {
-  const fixedSet = new Set(healthResult.fixedTaskIds);
+  // Combine fixed tasks and cascaded reset tasks
+  const allResetTaskIds = new Set([
+    ...healthResult.fixedTaskIds,
+    ...healthResult.cascadedResetTaskIds,
+  ]);
+
   return tasks.map((task) => {
-    if (fixedSet.has(task.id) && task.status === 'in_progress') {
+    if (allResetTaskIds.has(task.id) && task.status === 'in_progress') {
       return { ...task, status: 'open' as const };
     }
     return task;
@@ -247,7 +304,7 @@ function checkOrphanedHealth(
 }
 
 /** Build a human-readable summary of health check results */
-function buildSummary(issues: HealthIssue[], fixedTaskIds: string[]): string {
+function buildSummary(issues: HealthIssue[], fixedTaskIds: string[], cascadedResetTaskIds: string[]): string {
   if (issues.length === 0) {
     return 'All tasks are healthy — no issues found';
   }
@@ -264,6 +321,9 @@ function buildSummary(issues: HealthIssue[], fixedTaskIds: string[]): string {
   }
   if (fixedTaskIds.length > 0) {
     parts.push(`${fixedTaskIds.length} task(s) auto-fixed`);
+  }
+  if (cascadedResetTaskIds.length > 0) {
+    parts.push(`${cascadedResetTaskIds.length} dependent task(s) cascaded`);
   }
 
   return parts.join(', ');

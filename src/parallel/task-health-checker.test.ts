@@ -137,4 +137,36 @@ describe('applyHealthFixes', () => {
     // No deadlocks detected, so task B should stay in_progress
     expect(fixed[1].status).toBe('in_progress');
   });
+
+  test('cascades reset to dependent tasks', () => {
+    const tasks = [
+      task('A', { status: 'open' }),
+      task('B', { status: 'in_progress', dependsOn: ['A'] }),
+      task('C', { status: 'in_progress', dependsOn: ['B'] }),
+    ];
+    const healthResult = checkTaskHealth(tasks);
+    const fixed = applyHealthFixes(tasks, healthResult);
+
+    // Task B is deadlocked (A is not completed)
+    expect(fixed[0].status).toBe('open'); // A unchanged
+    expect(fixed[1].status).toBe('open'); // B reset from in_progress
+    expect(fixed[2].status).toBe('open'); // C cascaded reset (depends on B)
+
+    expect(healthResult.fixedTaskIds).toContain('B');
+    expect(healthResult.cascadedResetTaskIds).toContain('C');
+  });
+
+  test('handles multiple levels of cascading resets', () => {
+    const tasks = [
+      task('A', { status: 'open' }),
+      task('B', { status: 'in_progress', dependsOn: ['A'] }),
+      task('C', { status: 'in_progress', dependsOn: ['B'] }),
+      task('D', { status: 'in_progress', dependsOn: ['C'] }),
+    ];
+    const healthResult = checkTaskHealth(tasks);
+
+    expect(healthResult.fixedTaskIds).toContain('B');
+    expect(healthResult.cascadedResetTaskIds).toContain('C');
+    expect(healthResult.cascadedResetTaskIds).toContain('D');
+  });
 });
