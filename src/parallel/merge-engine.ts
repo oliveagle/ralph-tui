@@ -481,7 +481,27 @@ export class MergeEngine {
     // Fall back to merge commit
     try {
       // Use argument array to avoid shell injection with commit message
-      this.git(['merge', '--no-edit', '-m', operation.commitMessage, operation.sourceBranch]);
+      const sourceBranch = operation.sourceBranch;
+      const commitMsg = operation.commitMessage;
+
+      // Debug: check if source branch exists and has commits
+      console.log(`[merge] Attempting merge: source=${sourceBranch}, current=${this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim()}`);
+
+      // Verify source branch has commits
+      const sourceExists = this.git(['rev-parse', '--verify', `refs/heads/${sourceBranch}`]);
+      if (!sourceExists) {
+        throw new Error(`Source branch ${sourceBranch} not found`);
+      }
+
+      const sourceAhead = this.git(['rev-list', '--count', `${sourceBranch}..HEAD`]).trim();
+      const targetAhead = this.git(['rev-list', '--count', `HEAD..${sourceBranch}`]).trim();
+      console.log(`[merge] Branch status: source is ${sourceAhead} behind, ${targetAhead} ahead of HEAD`);
+
+      if (targetAhead === '0' && sourceAhead === '0') {
+        throw new Error(`Source branch ${sourceBranch} has no commits ahead of current HEAD`);
+      }
+
+      this.git(['merge', '--no-edit', '-m', commitMsg, sourceBranch]);
 
       const commitSha = this.git(['rev-parse', '--short', 'HEAD']).trim();
       const filesChanged = this.getFilesChangedCount(operation.backupTag);
@@ -495,7 +515,8 @@ export class MergeEngine {
       );
       return result;
     } catch (err) {
-      console.log(`[merge] Merge-commit failed for ${taskId}:`, err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.log(`[merge] Merge-commit failed for ${taskId}:`, errorMsg);
       console.log(`[merge] Merge-commit failed, checking for conflicts: ${taskId}`);
       // Merge failed — check for conflicts
     }
