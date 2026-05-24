@@ -22,7 +22,6 @@ import {
   executeInfoCommand,
   executeSkillsCommand,
   executeRemoteCommand,
-  executeRaloopCommand,
 } from './commands/index.js';
 import { checkBunVersion } from './utils/validation.js';
 import pkg from '../package.json' with { type: 'json' };
@@ -56,7 +55,6 @@ Commands:
   convert [options]   Convert PRD markdown to JSON format
   run [options]       Start Ralph execution
   resume [options]    Resume an interrupted session
-  raloop [options]    Auto-restart loop daemon
   status [options]    Check session status (headless, for CI/scripts)
   remote [subcommand] Manage remote server configurations
   logs [options]      View/manage iteration output logs
@@ -131,7 +129,6 @@ Examples:
   ralph-tui run --epic myproject-epic    # Run with specific epic
   ralph-tui run --prd ./prd.json         # Run with PRD file
   ralph-tui resume                       # Resume interrupted session
-  ralph-tui raloop --headless            # Run auto-restart daemon in headless mode
   ralph-tui status                       # Check session status
   ralph-tui status --json                # JSON output for CI/scripts
   ralph-tui logs                         # List iteration logs
@@ -204,12 +201,6 @@ async function handleSubcommand(args: string[]): Promise<boolean> {
   // Resume command
   if (command === 'resume') {
     await executeResumeCommand(args.slice(1));
-    return true;
-  }
-
-  // Raloop command
-  if (command === 'raloop') {
-    await executeRaloopCommand(args.slice(1));
     return true;
   }
 

@@ -352,7 +352,7 @@ export interface ParallelExecutorConfig {
 
   /**
    * When enabled, executor will poll for new tasks instead of exiting when empty.
-   * Used for raloop auto-restart mode to keep workers alive while waiting.
+   * Used for auto-poll mode to keep workers alive while waiting.
    */
   autoPoll?: boolean;
 }

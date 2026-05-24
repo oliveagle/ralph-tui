@@ -470,4 +470,257 @@ describe('MergeEngine', () => {
       expect(events).toHaveLength(1);
     });
   });
+
+  describe('conflict detection edge cases', () => {
+    test('handles non-existent source branch gracefully', async () => {
+      const task = mockTask('NE1');
+      engine.enqueue(mockWorkerResult(task, 'nonexistent-branch'));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.error).toBeDefined();
+    });
+
+    test('detects conflicts in deeply nested file paths', async () => {
+      // Create conflicting changes in nested paths
+      const branchName = 'ralph-parallel/NESTED';
+      const nestedDir = path.join(repoDir, 'src', 'features', 'auth');
+      fs.mkdirSync(nestedDir, { recursive: true });
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(nestedDir, 'login.ts'), 'branch login\n');
+      git(repoDir, 'add .');
+      git(repoDir, 'commit -m "Branch nested change"');
+      git(repoDir, 'checkout -');
+
+      // Recreate dir on main (checkout may have removed it)
+      fs.mkdirSync(nestedDir, { recursive: true });
+      fs.writeFileSync(path.join(nestedDir, 'login.ts'), 'main login\n');
+      git(repoDir, 'add .');
+      git(repoDir, 'commit -m "Main nested change"');
+
+      const task = mockTask('NESTED');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.hadConflicts).toBe(true);
+      expect(result!.error).toContain('login.ts');
+    });
+
+    test('handles branch that has been deleted after enqueue', async () => {
+      const branchName = 'ralph-parallel/DEL';
+      createBranchWithCommit(repoDir, branchName, 'to-delete.ts', 'content\n');
+
+      const task = mockTask('DEL');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      // Delete the branch before processing
+      git(repoDir, `branch -D "${branchName}"`);
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.error).toBeDefined();
+    });
+
+    test('detects conflicts when both sides add same file with different content', async () => {
+      const branchName = 'ralph-parallel/BOTHADD';
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'newfile.ts'), 'branch version\n');
+      git(repoDir, 'add newfile.ts');
+      git(repoDir, 'commit -m "Add on branch"');
+      git(repoDir, 'checkout -');
+
+      // Add same file on main
+      fs.writeFileSync(path.join(repoDir, 'newfile.ts'), 'main version\n');
+      git(repoDir, 'add newfile.ts');
+      git(repoDir, 'commit -m "Add on main"');
+
+      const task = mockTask('BOTHADD');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.hadConflicts).toBe(true);
+      expect(result!.error).toContain('newfile.ts');
+    });
+
+    test('handles when both sides delete same file (succeeds, no conflict)', async () => {
+      // Create a file first
+      fs.writeFileSync(path.join(repoDir, 'todelete.ts'), 'content\n');
+      git(repoDir, 'add todelete.ts');
+      git(repoDir, 'commit -m "Add file to delete"');
+
+      const branchName = 'ralph-parallel/BOTHDEL';
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.unlinkSync(path.join(repoDir, 'todelete.ts'));
+      git(repoDir, 'add todelete.ts');
+      git(repoDir, 'commit -m "Delete on branch"');
+      git(repoDir, 'checkout -');
+
+      // Delete on main too
+      fs.unlinkSync(path.join(repoDir, 'todelete.ts'));
+      git(repoDir, 'add todelete.ts');
+      git(repoDir, 'commit -m "Delete on main"');
+
+      const task = mockTask('BOTHDEL');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      // Both sides deleting the same file is not a conflict in git
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(true);
+      expect(fs.existsSync(path.join(repoDir, 'todelete.ts'))).toBe(false);
+    });
+
+    test('handles conflict with special characters in filename', async () => {
+      const branchName = 'ralph-parallel/SPECIAL';
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'file-with-dashes.ts'), 'branch\n');
+      git(repoDir, 'add file-with-dashes.ts');
+      git(repoDir, 'commit -m "Branch special"');
+      git(repoDir, 'checkout -');
+
+      fs.writeFileSync(path.join(repoDir, 'file-with-dashes.ts'), 'main\n');
+      git(repoDir, 'add file-with-dashes.ts');
+      git(repoDir, 'commit -m "Main special"');
+
+      const task = mockTask('SPECIAL');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.hadConflicts).toBe(true);
+      expect(result!.error).toContain('file-with-dashes.ts');
+    });
+
+    test('handles empty branch (branch at same commit as HEAD)', async () => {
+      // Create branch at current HEAD without commits
+      git(repoDir, 'branch empty-branch-no-commits');
+
+      const task = mockTask('EMPTY');
+      engine.enqueue(mockWorkerResult(task, 'empty-branch-no-commits'));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.error).toContain('No commits to merge');
+    });
+
+    test('handles branch with only whitespace changes (no semantic conflict)', async () => {
+      const branchName = 'ralph-parallel/WHITESPACE';
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'whitespace.ts'), 'const x = 1;\n');
+      git(repoDir, 'add whitespace.ts');
+      git(repoDir, 'commit -m "Add file on branch"');
+      git(repoDir, 'checkout -');
+
+      // Different content on main (actual conflict)
+      fs.writeFileSync(path.join(repoDir, 'whitespace.ts'), 'const x = 2;\n');
+      git(repoDir, 'add whitespace.ts');
+      git(repoDir, 'commit -m "Different content on main"');
+
+      const task = mockTask('WHITESPACE');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.hadConflicts).toBe(true);
+    });
+
+    test('emits conflict:detected event with proper metadata', async () => {
+      const events: ParallelEvent[] = [];
+      engine.on((e) => events.push(e));
+
+      const branchName = 'ralph-parallel/EVENT';
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'event.ts'), 'branch\n');
+      git(repoDir, 'add event.ts');
+      git(repoDir, 'commit -m "Branch"');
+      git(repoDir, 'checkout -');
+
+      fs.writeFileSync(path.join(repoDir, 'event.ts'), 'main\n');
+      git(repoDir, 'add event.ts');
+      git(repoDir, 'commit -m "Main"');
+
+      const task = mockTask('EVENT');
+      engine.enqueue(mockWorkerResult(task, branchName));
+      await engine.processNext();
+
+      const conflictEvent = events.find((e) => e.type === 'conflict:detected');
+      expect(conflictEvent).toBeDefined();
+      expect(conflictEvent?.type).toBe('conflict:detected');
+      expect(conflictEvent?.taskId).toBe('EVENT');
+    });
+
+    test('detects multiple conflicting files in single merge', async () => {
+      const branchName = 'ralph-parallel/MULTI';
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'file1.ts'), 'branch1\n');
+      fs.writeFileSync(path.join(repoDir, 'file2.ts'), 'branch2\n');
+      git(repoDir, 'add file1.ts file2.ts');
+      git(repoDir, 'commit -m "Branch multi"');
+      git(repoDir, 'checkout -');
+
+      fs.writeFileSync(path.join(repoDir, 'file1.ts'), 'main1\n');
+      fs.writeFileSync(path.join(repoDir, 'file2.ts'), 'main2\n');
+      git(repoDir, 'add file1.ts file2.ts');
+      git(repoDir, 'commit -m "Main multi"');
+
+      const task = mockTask('MULTI');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.hadConflicts).toBe(true);
+      // Both files should be mentioned in error
+      expect(result!.error).toContain('file1.ts');
+      expect(result!.error).toContain('file2.ts');
+    });
+
+    test('handles binary file conflicts', async () => {
+      const branchName = 'ralph-parallel/BINARY';
+
+      git(repoDir, `checkout -b "${branchName}"`);
+      fs.writeFileSync(path.join(repoDir, 'image.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      git(repoDir, 'add image.png');
+      git(repoDir, 'commit -m "Branch binary"');
+      git(repoDir, 'checkout -');
+
+      fs.writeFileSync(path.join(repoDir, 'image.png'), Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+      git(repoDir, 'add image.png');
+      git(repoDir, 'commit -m "Main binary"');
+
+      const task = mockTask('BINARY');
+      engine.enqueue(mockWorkerResult(task, branchName));
+
+      const result = await engine.processNext();
+
+      expect(result).not.toBeNull();
+      expect(result!.success).toBe(false);
+      expect(result!.hadConflicts).toBe(true);
+      expect(result!.error).toContain('image.png');
+    });
+  });
 });

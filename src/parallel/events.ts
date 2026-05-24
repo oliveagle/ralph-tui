@@ -49,7 +49,8 @@ export type ParallelEventType =
   | 'parallel:group-completed'
   | 'parallel:completed'
   | 'parallel:failed'
-  | 'parallel:health-check';
+  | 'parallel:health-check'
+  | 'parallel:deadlock-resolved';
 
 // ─── Worker Events ─────────────────────────────────────────────────────────────
 
@@ -270,6 +271,20 @@ export interface ParallelHealthCheckEvent extends EngineEventBase {
   healthCheck: HealthCheckResult;
 }
 
+/** Emitted when AI deadlock resolver successfully resolves a stuck task. */
+export interface ParallelDeadlockResolvedEvent extends EngineEventBase {
+  type: 'parallel:deadlock-resolved';
+  sessionId: string;
+  taskId: string;
+  action: {
+    type: string;
+    reason: string;
+  };
+  taskReset: boolean;
+  worktreePreserved: boolean;
+  message: string;
+}
+
 // ─── Union of All Parallel Events ──────────────────────────────────────────────
 
 /**
@@ -302,7 +317,8 @@ export type ParallelEvent =
   | ParallelGroupCompletedEvent
   | ParallelCompletedEvent
   | ParallelFailedEvent
-  | ParallelHealthCheckEvent;
+  | ParallelHealthCheckEvent
+  | ParallelDeadlockResolvedEvent;
 
 /**
  * Listener function for parallel events.

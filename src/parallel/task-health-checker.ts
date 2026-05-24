@@ -81,7 +81,7 @@ export interface HealthCheckerConfig {
 const DEFAULT_CONFIG: HealthCheckerConfig = {
   autoFixDeadlocks: true,
   autoFixOrphaned: true,
-  orphanThresholdMs: 3_600_000, // 1 hour
+  orphanThresholdMs: 10 * 60_000, // 10 minutes
 };
 
 /**
@@ -255,19 +255,9 @@ function checkDependencyHealth(
     }
   }
 
-  // Check blocks relationships (reverse: if task A is blocked by task B's blocks field)
-  // The `blocks` field means "this task blocks the listed tasks", so if any task
-  // has this task in its `blocks` field, that listed task depends on this one.
-  // We need to check if this task has dependencies from other tasks' blocks fields.
-  for (const [otherId, other] of taskMap) {
-    if (otherId === task.id) continue;
-    if (other.blocks && other.blocks.includes(task.id)) {
-      // other.blocks includes task.id → task depends on other
-      if (other.status !== 'completed' && !incompleteDeps.includes(otherId)) {
-        incompleteDeps.push(otherId);
-      }
-    }
-  }
+  // blocks field is our dependents — tasks that depend on us being complete.
+  // This is NOT a dependency for this task, so we skip it here.
+  // Our upstream dependencies are already checked via dependsOn above.
 
   if (incompleteDeps.length > 0) {
     issues.push({

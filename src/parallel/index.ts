@@ -15,6 +15,7 @@ import { WorktreeManager } from './worktree-manager.js';
 import { MergeEngine } from './merge-engine.js';
 import { ConflictResolver, type AiResolverCallback } from './conflict-resolver.js';
 import { Worker } from './worker.js';
+import { DeadlockResolver } from './deadlock-resolver.js';
 import type {
   MergeOperation,
   ParallelExecutorConfig,
@@ -71,6 +72,7 @@ export class ParallelExecutor {
   private readonly worktreeManager: WorktreeManager;
   private readonly mergeEngine: MergeEngine;
   private readonly conflictResolver: ConflictResolver;
+  private readonly deadlockResolver: DeadlockResolver;
 
   private status: ParallelExecutorStatus = 'idle';
   private taskGraph: TaskGraphAnalysis | null = null;
@@ -129,6 +131,15 @@ export class ParallelExecutor {
 
     this.mergeEngine = new MergeEngine(this.config.cwd);
     this.conflictResolver = new ConflictResolver(this.config.cwd);
+    this.deadlockResolver = new DeadlockResolver(
+      {
+        cwd: this.config.cwd,
+        sessionId: this.sessionId,
+        worktreeDir: this.config.worktreeDir,
+      },
+      tracker,
+      baseConfig
+    );
 
     // Wire up merge and conflict events
     this.mergeEngine.on((event) => this.emitParallel(event));
@@ -1524,6 +1535,10 @@ export class ParallelExecutor {
   /**
    * Run health check on all tasks and auto-fix any deadlocks or orphaned tasks.
    * Called before each group execution and at the start of continuous mode loops.
+   *
+   * Uses AI DeadlockResolver to diagnose and fix stuck tasks, rather than
+   * blindly resetting task state. The AI agent analyzes git state, worktree
+   * status, and dependency chains to determine the correct recovery action.
    */
   private async runHealthCheckAndFix(): Promise<void> {
     try {
@@ -1541,10 +1556,10 @@ export class ParallelExecutor {
       // Skip epics
       filteredTasks = filteredTasks.filter((t) => t.type !== 'epic');
 
-      // Run health check
+      // Run health check (detection only — no auto-fix)
       const healthCheck = checkTaskHealth(filteredTasks, {
-        autoFixDeadlocks: true,
-        autoFixOrphaned: true,
+        autoFixDeadlocks: false, // Let AI resolver handle fixes
+        autoFixOrphaned: false,
       });
 
       if (healthCheck.issues.length > 0) {
@@ -1555,13 +1570,46 @@ export class ParallelExecutor {
           healthCheck,
         });
 
-        // Persist fixes to tracker (both fixed and cascaded tasks)
-        const allResetTaskIds = [...healthCheck.fixedTaskIds, ...healthCheck.cascadedResetTaskIds];
-        for (const taskId of allResetTaskIds) {
-          try {
-            await this.tracker.updateTaskStatus(taskId, 'open');
-          } catch (err) {
-            console.error(`[parallel] Failed to reset task ${taskId} to open:`, err);
+        // Use AI resolver to diagnose and fix each deadlocked task
+        for (const issue of healthCheck.issues) {
+          if (issue.severity === 'error' || issue.severity === 'warning') {
+            console.log(`[parallel] AI deadlock resolution: ${issue.taskId} (${issue.message})`);
+
+            const stuckTask = filteredTasks.find((t) => t.id === issue.taskId);
+            if (!stuckTask) continue;
+
+            const diagnostic = await this.deadlockResolver.diagnose(stuckTask);
+            const resolution = await this.deadlockResolver.resolve(diagnostic);
+
+            console.log(`[parallel] Deadlock resolved: ${resolution.message}`);
+
+            // Execute the AI's decision
+            if (resolution.actionTaken.type === 'reset_to_open' && resolution.taskReset) {
+              // Task was already reset by DeadlockResolver, but we need to persist it
+              console.log(`[parallel] Task ${stuckTask.id} reset to open per AI decision`);
+            } else if (resolution.actionTaken.type === 'continue' && !resolution.taskReset) {
+              // AI says to continue - task is already in_progress, just log
+              console.log(`[parallel] Task ${stuckTask.id} continuing execution per AI decision`);
+            } else if (resolution.actionTaken.type === 'merge_and_close') {
+              // AI says to merge and close - this means the task is actually complete
+              try {
+                await this.tracker.completeTask(stuckTask.id, `AI-resolved: ${resolution.actionTaken.reason}`);
+                console.log(`[parallel] Task ${stuckTask.id} closed per AI decision`);
+              } catch (err) {
+                console.error(`[parallel] Failed to close task ${stuckTask.id}:`, err);
+              }
+            }
+
+            this.emitParallel({
+              type: 'parallel:deadlock-resolved',
+              timestamp: new Date().toISOString(),
+              sessionId: this.sessionId,
+              taskId: stuckTask.id,
+              action: resolution.actionTaken,
+              taskReset: resolution.taskReset,
+              worktreePreserved: resolution.worktreePreserved,
+              message: resolution.message,
+            });
           }
         }
       }

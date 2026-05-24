@@ -3943,12 +3943,12 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     await engine.initialize(undefined, { tracker });
 
     // In auto-loop mode, reset ALL in_progress tasks to open
-    // Reason: only one raloop + parallel instance should run per project
+    // Reason: only one parallel instance should run per project
     // Any in_progress tasks at startup indicate incorrect state
     if (options.autoLoop) {
       const allTasks = await tracker.getTasks({ status: ['in_progress'] });
       if (allTasks.length > 0) {
-        console.log(`[raloop] Resetting ${allTasks.length} in_progress task(s) to open...`);
+        console.log(`[auto-loop] Resetting ${allTasks.length} in_progress task(s) to open...`);
         for (const task of allTasks) {
           try {
             await tracker.updateTaskStatus(task.id, 'open');
@@ -3956,7 +3956,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
             // Continue on individual failures
           }
         }
-        console.log(`[raloop] Reset complete.`);
+        console.log(`[auto-loop] Reset complete.`);
       }
     }
 

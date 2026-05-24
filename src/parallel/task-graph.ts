@@ -200,7 +200,7 @@ function shouldRunParallelInternal(
   _cyclicCount: number
 ): boolean {
   // Always run in parallel mode (auto-loop will wait for tasks if none exist)
-  // This allows raloop to keep running and poll for new tasks
+  // This allows the executor to keep running and poll for new tasks
   return true;
 }
 
