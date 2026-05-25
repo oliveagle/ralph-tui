@@ -11,6 +11,7 @@ export interface RaloopOptions {
   count?: number;
   commands: string[];
   daemon?: boolean;
+  parallel?: number | boolean;
   help?: boolean;
 }
 
@@ -46,6 +47,21 @@ export function parseRaloopArgs(args: string[]): RaloopOptions {
       }
     } else if (arg === '--daemon' || arg === '-d') {
       options.daemon = true;
+    } else if (arg === '--parallel' || arg === '-p') {
+      // --parallel or --parallel N where N is max workers
+      const nextArg = args[i + 1];
+      if (nextArg && !nextArg.startsWith('-')) {
+        const val = parseInt(nextArg, 10);
+        if (!isNaN(val) && val > 0) {
+          options.parallel = val;
+          i++;
+        } else {
+          console.error(`Invalid parallel worker count: ${nextArg}`);
+          process.exit(1);
+        }
+      } else {
+        options.parallel = true; // default to 3 workers
+      }
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else if (arg === '--command' || arg === '-C') {
@@ -124,8 +140,8 @@ export async function executeRaloopCommand(args: string[]): Promise<void> {
   const commands = options.commands;
 
   // Default: patrol mode (beads task monitoring)
-  if (commands.length === 0) {
-    await executePatrolCommand();
+  if (commands.length === 0 || options.parallel) {
+    await executePatrolCommand({ parallel: options.parallel });
     return;
   }
 
@@ -241,6 +257,7 @@ Options:
   -i, --interval <ms>   Loop interval in milliseconds (default: 300000 = 5min)
   -c, --count <n>       Number of iterations (default: infinite)
   -C, --command <cmd>   Commands to run each iteration (default: patrol mode)
+  -p, --parallel        Run tasks in parallel mode (--no-worktree by default)
   -d, --daemon          Run as a background daemon
   -h, --help            Show this help message
 
@@ -252,10 +269,15 @@ Description:
   - Uses AI agent to analyze and auto-resolve issues
   - Records patrol findings to .ralph-tui/patrol/
 
+  With --parallel, runs tasks sequentially in the main directory without
+  worktrees. This is the recommended mode for raloop since patrol tasks
+  don't conflict with each other.
+
   With -C, runs custom shell commands in a loop instead.
 
 Examples:
   ralph-tui raloop                           # Patrol beads tasks every 5min
+  ralph-tui raloop --parallel                # Run tasks in no-worktree mode
   ralph-tui raloop -C 'git status'           # Custom command loop every 5min
   ralph-tui raloop -i 10000 -C 'git pull'   # Custom interval and command
   ralph-tui raloop -c 5 -C 'git status'     # Run 5 times then stop

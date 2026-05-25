@@ -262,8 +262,16 @@ async function savePatrolResult(result: PatrolResult): Promise<void> {
   await fs.promises.appendFile(logFile, logEntry, 'utf-8');
 }
 
-export async function executePatrolCommand(): Promise<void> {
-  console.log('[raloop] Starting raloop - automated patrol agent');
+export interface PatrolCommandOptions {
+  parallel?: number | boolean;
+}
+
+export async function executePatrolCommand(options: PatrolCommandOptions = {}): Promise<void> {
+  if (options.parallel) {
+    console.log('[raloop] Starting raloop - parallel patrol agent (--no-worktree mode)');
+  } else {
+    console.log('[raloop] Starting raloop - automated patrol agent');
+  }
   console.log(`[raloop] Interval: ${DEFAULT_CONFIG.intervalSeconds}s, AI resolver: ${DEFAULT_CONFIG.useAiResolver}`);
   console.log('[raloop] Press Ctrl+C to stop');
 
@@ -271,8 +279,9 @@ export async function executePatrolCommand(): Promise<void> {
   const { registerBuiltinTrackers } = await import('../plugins/trackers/builtin/index.js');
   const { getTrackerRegistry } = await import('../plugins/trackers/registry.js');
   const { getAgentRegistry } = await import('../plugins/agents/registry.js');
-  const { buildConfig } = await import('../config/index.js');
+  const { buildConfig, loadStoredConfig } = await import('../config/index.js');
   const { DeadlockResolver } = await import('../parallel/deadlock-resolver.js');
+  const { ParallelExecutor } = await import('../parallel/index.js');
 
   // Initialize plugins (same pattern as run.tsx)
   registerBuiltinAgents();
@@ -288,6 +297,29 @@ export async function executePatrolCommand(): Promise<void> {
     process.exit(1);
   }
   const tracker = await trackerRegistry.getInstance(config.tracker);
+
+  if (options.parallel) {
+    // Determine max workers from options or config
+    const storedConfig = await loadStoredConfig();
+    const maxWorkers = typeof options.parallel === 'number'
+      ? options.parallel
+      : storedConfig?.parallel?.maxWorkers ?? 3;
+
+    // Parallel mode: run tasks via ParallelExecutor with --no-worktree by default
+    const executor = new ParallelExecutor(config, tracker, {
+      noWorktree: true,
+      autoPoll: true,
+      maxWorkers,
+    });
+
+    try {
+      await executor.execute();
+    } catch (err) {
+      console.error('[raloop] Parallel execution failed:', err);
+      process.exit(1);
+    }
+    return;
+  }
 
   const deadlockResolver = new DeadlockResolver(
     { cwd: process.cwd(), sessionId: 'raloop', worktreeDir: '.ralph-tui/worktrees' },
