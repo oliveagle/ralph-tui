@@ -248,7 +248,7 @@ export class DeadlockResolver {
         hasUncommittedChanges,
         modifiedFiles,
       };
-    } catch (err) {
+    } catch {
       return { exists: false };
     }
   }

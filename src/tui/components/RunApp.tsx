@@ -231,6 +231,8 @@ export interface RunAppProps {
   parallelRefreshedTasks?: TrackerTask[];
   /** Callback to manually refresh tasks in parallel mode (for 'r' key when no engine) */
   onRefreshTasks?: () => void;
+  /** When true, parallel mode runs tasks sequentially in main directory (no worktree isolation) */
+  parallelNoWorktree?: boolean;
 }
 
 /**

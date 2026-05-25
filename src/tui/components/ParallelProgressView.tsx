@@ -26,6 +26,8 @@ export interface ParallelProgressViewProps {
   maxWidth: number;
   /** Currently selected worker index (-1 = none) */
   selectedWorkerIndex: number;
+  /** When true, running in no-worktree mode (sequential execution, no merge queue) */
+  noWorktree?: boolean;
 }
 
 /**
