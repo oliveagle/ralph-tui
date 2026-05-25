@@ -93,22 +93,32 @@ export class Worker {
    * @param tracker - Pre-initialized tracker plugin from the parent executor
    */
   async initialize(baseConfig: RalphConfig, tracker: TrackerPlugin): Promise<void> {
-    // Save current branch before switching
-    this.originalBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    // Set status to 'running' early so TUI doesn't see stale idle state during initialization.
+    // Workers are added to activeWorkers before initialize() is called, so the status
+    // needs to be updated before git operations (which can take time) start.
+    this.status = 'running';
 
-    // In no-worktree mode, skip branch switching entirely — work on current branch
-    if (!this.config.noWorktree) {
-      // Switch to the worker's assigned branch
-      this.git(['checkout', this.config.branchName]);
-      console.log(`[worker] ${this.id} switched to branch '${this.config.branchName}'`);
+    // In no-worktree mode, skip ALL git operations — work on current branch
+    if (this.config.noWorktree) {
+      this.originalBranch = null; // Not needed since we never switch
     } else {
-      console.log(`[worker] ${this.id} running in no-worktree mode on branch '${this.originalBranch}'`);
+      // Save current branch before switching
+      this.originalBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+      // Switch to the worker's assigned branch (--force discards uncommitted session files)
+      this.git(['checkout', '--force', this.config.branchName]);
+      console.log(`[worker] ${this.id} switched to branch '${this.config.branchName}'`);
     }
 
     // Ensure .ralph-tui directory exists
     const ralphDir = `${this.cwd}/.ralph-tui`;
     await mkdir(ralphDir, { recursive: true });
-    const progressFilePath = `${ralphDir}/progress.md`;
+
+    // In no-worktree mode with multiple workers, use worker-specific output directories
+    // to prevent concurrent agents from overwriting each other's iteration logs
+    const outputDir = `${this.cwd}/.ralph-tui/iterations-${this.id}`;
+    await mkdir(outputDir, { recursive: true });
+
+    const progressFilePath = `${ralphDir}/progress-${this.id}.md`;
     try {
       await writeFile(progressFilePath, '', 'utf-8');
     } catch {
@@ -120,7 +130,7 @@ export class Worker {
       ...baseConfig,
       cwd: this.cwd,
       maxIterations: this.maxIterations,
-      outputDir: `${this.cwd}/.ralph-tui/iterations`,
+      outputDir,
       progressFile: progressFilePath,
       sessionId: `${baseConfig.sessionId ?? 'session'}-${this.id}`,
       autoCommit: true,
@@ -368,7 +378,9 @@ export class Worker {
     }
     if (this.originalBranch) {
       try {
-        this.git(['checkout', this.originalBranch]);
+        // Use --force to discard local changes when switching back
+        // This is safe because all committed work is on the worker branch
+        this.git(['checkout', '--force', this.originalBranch]);
         console.log(`[worker] ${this.id} switched back to branch '${this.originalBranch}'`);
       } catch (err) {
         console.error(`[worker] ${this.id} failed to switch back to original branch:`, err);

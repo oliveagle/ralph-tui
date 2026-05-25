@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import type { RalphConfig } from '../config/types.js';
 import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
 import { ExecutionEngine, type WorkerModeOptions } from '../engine/index.js';
-import type { EngineEvent, EngineEventListener } from '../engine/types.js';
+import type { EngineEventListener } from '../engine/types.js';
 import { analyzeTaskGraph, shouldRunParallel } from './task-graph.js';
 import { checkTaskHealth, applyHealthFixes } from './task-health-checker.js';
 import { WorktreeManager } from './worktree-manager.js';
@@ -655,13 +655,46 @@ export class ParallelExecutor {
         const engine = new ExecutionEngine(taskConfig);
 
         // Forward engine events with worker context
-        engine.on((event: EngineEvent) => {
-          // Transform engine events to parallel events
-          const parallelEvent: ParallelEvent = {
-            ...event,
-            workerId: 'sequential',
-          };
-          this.emitParallel(parallelEvent);
+        engine.on((event) => {
+          // Map engine events to parallel worker events
+          switch (event.type) {
+            case 'engine:started':
+              this.emitParallel({
+                type: 'worker:started',
+                timestamp: event.timestamp,
+                workerId: 'sequential',
+                task,
+              });
+              break;
+            case 'task:auto-committed':
+            case 'task:auto-commit-failed':
+            case 'task:auto-commit-skipped':
+              // Forward as unknown - these match parallel event shape
+              this.emitParallel(event as unknown as ParallelEvent);
+              break;
+            case 'engine:stopped': {
+              const stopEvent = event;
+              this.emitParallel({
+                type: 'worker:completed',
+                timestamp: stopEvent.timestamp,
+                workerId: 'sequential',
+                result: {
+                  workerId: 'sequential',
+                  task,
+                  success: stopEvent.reason === 'completed',
+                  iterationsRun: stopEvent.totalIterations,
+                  taskCompleted: stopEvent.tasksCompleted > 0,
+                  durationMs: 0,
+                  branchName: '',
+                  commitCount: 0,
+                },
+              });
+              break;
+            }
+            default:
+              // Ignore other engine events
+              break;
+          }
         });
 
         // Initialize in worker mode with forced task
@@ -684,7 +717,6 @@ export class ParallelExecutor {
             type: 'worker:completed',
             timestamp: new Date().toISOString(),
             workerId: 'sequential',
-            task,
             result: {
               workerId: 'sequential',
               task,
@@ -741,7 +773,6 @@ export class ParallelExecutor {
       totalMergesCompleted: 0,
       totalConflictsResolved: 0,
       durationMs: Date.now() - Date.parse(this.startedAt!),
-      noWorktreeMode: true,
     });
   }
 
@@ -1068,6 +1099,12 @@ export class ParallelExecutor {
       workerCount: Math.min(group.tasks.length, this.config.maxWorkers),
     });
 
+    // In no-worktree mode, skip merge logic entirely — tasks commit directly to current branch
+    if (this.config.noWorktree) {
+      await this.executeGroupNoWorktree(group, groupIndex, totalGroups);
+      return;
+    }
+
     // Process tasks in batches, allowing failed merges to be re-queued.
     const pendingTasks = [...group.tasks];
     let groupTasksCompleted = 0;
@@ -1240,6 +1277,223 @@ export class ParallelExecutor {
   }
 
   /**
+   * Execute a group in no-worktree mode: tasks run in parallel on current branch
+   * with worker-specific output directories to prevent conflicts.
+   */
+  private async executeGroupNoWorktree(
+    group: { index: number; tasks: TrackerTask[]; depth: number },
+    groupIndex: number,
+    totalGroups: number
+  ): Promise<void> {
+    console.log(`[parallel] executeGroupNoWorktree: group ${groupIndex}, ${group.tasks.length} task(s), ${this.config.maxWorkers} workers max`);
+    let groupTasksCompleted = 0;
+    let groupTasksFailed = 0;
+
+    const pendingTasks = [...group.tasks];
+
+    // Process tasks in batches, allowing failed tasks to be re-queued
+    while (pendingTasks.length > 0) {
+      if (this.shouldStop) break;
+      await this.waitWhilePaused();
+      if (this.shouldStop) break;
+
+      // Determine batch size (up to maxWorkers)
+      const batchSize = Math.min(pendingTasks.length, this.config.maxWorkers);
+      const batch = pendingTasks.splice(0, batchSize);
+      const currentBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: this.config.cwd,
+        encoding: 'utf-8',
+      }).trim();
+
+      // Create workers for this batch
+      const workers: Array<{ worker: Worker; task: TrackerTask; checkpointName: string; checkpointCreated: boolean }> = [];
+
+      for (const task of batch) {
+        const workerId = `w-parallel-${groupIndex}-${task.id}`;
+
+        // Try to mark task as in_progress
+        const updatedTask = await this.tracker.updateTaskStatus(task.id, 'in_progress');
+        if (!updatedTask) {
+          console.log(`[parallel] Task ${task.id} blocked in no-worktree mode, resetting to open`);
+          try {
+            await this.tracker.updateTaskStatus(task.id, 'open');
+          } catch (err) {
+            console.error(`[parallel] Failed to reset blocked task ${task.id} to open:`, err);
+          }
+          groupTasksFailed++;
+          this.totalTasksFailed++;
+          // Re-queue blocked task
+          pendingTasks.push(task);
+          continue;
+        }
+
+        // Create git checkpoint before running the task
+        const checkpointName = `ralph-checkpoint/${this.sessionId}-${task.id}`;
+        const checkpointCreated = this.createCheckpoint(checkpointName);
+
+        // Create a no-worktree worker that runs on current branch
+        const worker = new Worker(
+          {
+            id: workerId,
+            task,
+            worktreePath: this.config.cwd,
+            branchName: currentBranch,
+            cwd: this.config.cwd,
+            noWorktree: true,
+          },
+          this.config.maxIterationsPerWorker
+        );
+
+        // Immediately set status to 'running' so TUI doesn't see idle status
+        (worker as any).status = 'running';
+
+        // Forward events
+        worker.on((event) => this.emitParallel(event));
+        worker.onEngineEvent((event) => {
+          for (const listener of this.engineListeners) {
+            try {
+              listener(event);
+            } catch {
+              // Don't let listener errors propagate
+            }
+          }
+        });
+
+        workers.push({ worker, task, checkpointName, checkpointCreated });
+      }
+
+      // Set activeWorkers to all workers in this batch
+      this.activeWorkers = workers.map((w) => w.worker);
+
+      // Run all workers in parallel
+      const results = await Promise.allSettled(
+        workers.map(async ({ worker, task, checkpointName, checkpointCreated }) => {
+          try {
+            await worker.initialize(this.baseConfig, this.tracker);
+            const result = await worker.start();
+
+            if (result.success && result.taskCompleted) {
+              console.log(`[parallel] no-worktree: task ${task.id} completed successfully`);
+              return { task, result, success: true, checkpointCreated, checkpointName };
+            } else {
+              console.log(`[parallel] no-worktree: task ${task.id} failed (${result.error ?? 'not completed'}), rolling back`);
+              // Rollback to checkpoint
+              if (checkpointCreated) {
+                this.rollbackToCheckpoint(checkpointName);
+              }
+              return { task, result, success: false, checkpointCreated, checkpointName, shouldRequeue: true };
+            }
+          } catch (err) {
+            console.error(`[parallel] no-worktree: worker ${worker.id} crashed:`, err);
+            // Rollback to checkpoint
+            if (checkpointCreated) {
+              this.rollbackToCheckpoint(checkpointName);
+            }
+            return { task, result: null as any, success: false, checkpointCreated, checkpointName, shouldRequeue: true };
+          }
+        })
+      );
+
+      // Process results
+      for (const settled of results) {
+        if (settled.status === 'fulfilled') {
+          const { task, result, success, checkpointName, shouldRequeue: shouldRequeueValue } = settled.value;
+          if (success) {
+            groupTasksCompleted++;
+            this.totalTasksCompleted++;
+            this.requeueCounts.delete(task.id);
+          } else {
+            groupTasksFailed++;
+            this.totalTasksFailed++;
+            // Re-queue task based on retry budget
+            const actualShouldRequeue = shouldRequeueValue ?? !result?.taskCompleted;
+            if (actualShouldRequeue) {
+              const requeued = await this.handleNoWorktreeTaskFailure(task);
+              if (requeued) {
+                pendingTasks.push(task);
+              }
+            }
+          }
+          // Cleanup checkpoint tag
+          try {
+            this.git(['tag', '-d', checkpointName]);
+          } catch {
+            // Ignore
+          }
+        } else {
+          // Promise rejected - shouldn't happen with Promise.allSettled but handle it
+          groupTasksFailed++;
+          this.totalTasksFailed++;
+        }
+      }
+
+      // Clear activeWorkers after batch completes
+      this.activeWorkers = [];
+    }
+
+    this.emitParallel({
+      type: 'parallel:group-completed',
+      timestamp: new Date().toISOString(),
+      groupIndex,
+      totalGroups,
+      tasksCompleted: groupTasksCompleted,
+      tasksFailed: groupTasksFailed,
+      mergesCompleted: 0,
+      mergesFailed: 0,
+    });
+  }
+
+  /**
+   * Create a git checkpoint tag for rollback purposes.
+   */
+  private createCheckpoint(name: string): boolean {
+    try {
+      this.git(['tag', '-f', name]);
+      console.log(`[parallel] Checkpoint created: ${name}`);
+      return true;
+    } catch (err) {
+      console.error(`[parallel] Failed to create checkpoint ${name}:`, err);
+      return false;
+    }
+  }
+
+  /**
+   * Rollback to a git checkpoint tag.
+   */
+  private rollbackToCheckpoint(name: string): void {
+    try {
+      this.git(['reset', '--hard', name]);
+      this.git(['clean', '-fd']);
+      console.log(`[parallel] Rolled back to checkpoint: ${name}`);
+    } catch (err) {
+      console.error(`[parallel] Failed to rollback to checkpoint ${name}:`, err);
+    }
+  }
+
+  /**
+   * Handle task failure in no-worktree mode by tracking retries.
+   */
+  private async handleNoWorktreeTaskFailure(task: TrackerTask): Promise<boolean> {
+    const taskId = task.id;
+    const currentCount = this.requeueCounts.get(taskId) ?? 0;
+    const shouldRequeue = currentCount < this.config.maxRequeueCount;
+
+    if (shouldRequeue) {
+      this.requeueCounts.set(taskId, currentCount + 1);
+      console.log(`[parallel] no-worktree: task ${taskId} requeued (attempt ${currentCount + 1}/${this.config.maxRequeueCount})`);
+      try {
+        await this.tracker.updateTaskStatus(taskId, 'open');
+      } catch {
+        // Log but don't fail
+      }
+    } else {
+      console.log(`[parallel] no-worktree: task ${taskId} permanently failed after ${currentCount + 1} attempts`);
+    }
+
+    return shouldRequeue;
+  }
+
+  /**
    * Execute a batch of tasks sequentially using workers.
    * Workers run one at a time since they all operate in the main directory
    * by switching branches. This preserves the task graph analysis while
@@ -1293,6 +1547,10 @@ export class ParallelExecutor {
         },
         this.config.maxIterationsPerWorker
       );
+
+      // Immediately set status to 'running' so TUI doesn't see idle status
+      // This is necessary because we add to activeWorkers before calling initialize()
+      (worker as any).status = 'running';
 
       // Forward worker events
       worker.on((event) => this.emitParallel(event));
@@ -1783,6 +2041,17 @@ export class ParallelExecutor {
       console.error('[parallel] Health check failed:', err);
       // Don't fail the whole execution due to health check issues
     }
+  }
+
+  /**
+   * Run a git command in the executor's working directory.
+   */
+  private git(args: string[]): string {
+    return execFileSync('git', ['-C', this.config.cwd, ...args], {
+      encoding: 'utf-8',
+      timeout: 30000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
   }
 }
 

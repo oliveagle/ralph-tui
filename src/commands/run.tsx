@@ -807,8 +807,10 @@ export async function writeSequentialRunSummary(
 
 /**
  * Validate that git state is safe for parallel worktree/merge execution.
+ * When noWorktree is true, skip working tree cleanliness checks since all work
+ * is done directly on the current branch.
  */
-function checkParallelGitPreflight(cwd: string): ParallelGitPreflightResult {
+function checkParallelGitPreflight(cwd: string, noWorktree = false): ParallelGitPreflightResult {
   const errors: string[] = [];
   const baseOptions = { cwd, encoding: 'utf-8' as const, timeout: 5000 };
 
@@ -832,59 +834,63 @@ function checkParallelGitPreflight(cwd: string): ParallelGitPreflightResult {
     errors.push('Parallel mode requires a named branch (detached HEAD is not supported).');
   }
 
-  const trackedStatus = spawnSync(
-    'git',
-    ['status', '--porcelain', '--untracked-files=no'],
-    baseOptions
-  );
-  if (trackedStatus.status !== 0) {
-    errors.push('Unable to verify git working tree status.');
-  } else if (trackedStatus.stdout.trim().length > 0) {
-    // Filter out .ralph-tui/ and .beads/ changes - these are state files
-    // that get modified during execution and should not block parallel mode
-    const modifiedFiles = trackedStatus.stdout.trim().split('\n');
-    const otherChanges = modifiedFiles.filter((line) => {
-      // Git status --porcelain format: XY filename (XY is 2-char status code)
-      // Handle both 'M ' (index) and ' M ' (working tree) formats
-      let filePath;
-      if (line.startsWith(' ')) {
-        // Working tree modified: ' M filename' format
-        filePath = line.substring(3).trim();
-      } else {
-        // Index modified: 'M filename' format
-        filePath = line.substring(2).trim();
-      }
-      // Normalize path: remove leading ./ if present
-      const normalizedPath = filePath.startsWith('./') ? filePath.substring(2) : filePath;
-      // Check if path is in the state directories (with or without leading dot)
-      return !(normalizedPath.startsWith('.ralph-tui/') || normalizedPath.startsWith('ralph-tui/') ||
-               normalizedPath.startsWith('.beads/') || normalizedPath.startsWith('beads/'));
-    });
-    if (otherChanges.length > 0) {
-      errors.push(
-        'Tracked working tree is not clean. Commit or stash tracked changes before parallel mode.'
-      );
-    }
-  }
-
-  const unmerged = spawnSync('git', ['ls-files', '-u'], baseOptions);
-  if (unmerged.status !== 0) {
-    const exitCode = unmerged.status;
-    const stderr = unmerged.stderr.trim();
-    errors.push(
-      stderr
-        ? `Unable to verify unresolved merge entries (git ls-files -u exited with code ${exitCode}): ${stderr}`
-        : `Unable to verify unresolved merge entries (git ls-files -u exited with code ${exitCode}).`
+  // In no-worktree mode, skip working tree and merge state checks
+  // since all work is done directly on the current branch
+  if (!noWorktree) {
+    const trackedStatus = spawnSync(
+      'git',
+      ['status', '--porcelain', '--untracked-files=no'],
+      baseOptions
     );
-  } else if (unmerged.stdout.trim().length > 0) {
-    errors.push('Repository has unresolved merge entries (git ls-files -u is not empty).');
-  }
+    if (trackedStatus.status !== 0) {
+      errors.push('Unable to verify git working tree status.');
+    } else if (trackedStatus.stdout.trim().length > 0) {
+      // Filter out .ralph-tui/ and .beads/ changes - these are state files
+      // that get modified during execution and should not block parallel mode
+      const modifiedFiles = trackedStatus.stdout.trim().split('\n');
+      const otherChanges = modifiedFiles.filter((line) => {
+        // Git status --porcelain format: XY filename (XY is 2-char status code)
+        // Handle both 'M ' (index) and ' M ' (working tree) formats
+        let filePath;
+        if (line.startsWith(' ')) {
+          // Working tree modified: ' M filename' format
+          filePath = line.substring(3).trim();
+        } else {
+          // Index modified: 'M filename' format
+          filePath = line.substring(2).trim();
+        }
+        // Normalize path: remove leading ./ if present
+        const normalizedPath = filePath.startsWith('./') ? filePath.substring(2) : filePath;
+        // Check if path is in the state directories (with or without leading dot)
+        return !(normalizedPath.startsWith('.ralph-tui/') || normalizedPath.startsWith('ralph-tui/') ||
+                 normalizedPath.startsWith('.beads/') || normalizedPath.startsWith('beads/'));
+      });
+      if (otherChanges.length > 0) {
+        errors.push(
+          'Tracked working tree is not clean. Commit or stash tracked changes before parallel mode.'
+        );
+      }
+    }
 
-  const inProgressRefs = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD'];
-  for (const ref of inProgressRefs) {
-    const result = spawnSync('git', ['rev-parse', '-q', '--verify', ref], baseOptions);
-    if (result.status === 0) {
-      errors.push(`Repository has an in-progress git operation (${ref}).`);
+    const unmerged = spawnSync('git', ['ls-files', '-u'], baseOptions);
+    if (unmerged.status !== 0) {
+      const exitCode = unmerged.status;
+      const stderr = unmerged.stderr.trim();
+      errors.push(
+        stderr
+          ? `Unable to verify unresolved merge entries (git ls-files -u exited with code ${exitCode}): ${stderr}`
+          : `Unable to verify unresolved merge entries (git ls-files -u exited with code ${exitCode}).`
+      );
+    } else if (unmerged.stdout.trim().length > 0) {
+      errors.push('Repository has unresolved merge entries (git ls-files -u is not empty).');
+    }
+
+    const inProgressRefs = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD'];
+    for (const ref of inProgressRefs) {
+      const result = spawnSync('git', ['rev-parse', '-q', '--verify', ref], baseOptions);
+      if (result.status === 0) {
+        errors.push(`Repository has an in-progress git operation (${ref}).`);
+      }
     }
   }
 
@@ -1273,8 +1279,9 @@ Options:
   --no-network        Disable network access in sandbox
   --serial            Force sequential execution (default behavior)
   --sequential        Alias for --serial
-  --parallel [N]      Force parallel execution with optional max workers (default workers: 3)
-  --no-worktree       Run tasks sequentially in main directory (no worktree isolation)
+  --parallel [N]      Force parallel execution with optional max workers (default: no-worktree mode)
+  --worktree          Enable worktree isolation (requires clean git state)
+  --no-worktree       Run tasks sequentially in main directory (default with --parallel)
   --direct-merge      Merge directly to current branch (skip session branch creation)
   --target-branch <name> Create/use explicit session branch name for parallel mode
   --task-range <range> Filter tasks by index (e.g., 1-5, 3-, -10)
@@ -1858,6 +1865,8 @@ interface RunAppWrapperProps {
   onRefreshTasks?: () => void;
   /** When true, the InstanceManager skips the local tab (remote-only mode). */
   remoteOnly?: boolean;
+  /** When true, parallel mode runs tasks sequentially in main directory (no worktree isolation) */
+  parallelNoWorktree?: boolean;
 }
 
 /**
@@ -1917,6 +1926,7 @@ function RunAppWrapper({
   parallelRefreshedTasks,
   onRefreshTasks,
   remoteOnly = false,
+  parallelNoWorktree = false,
 }: RunAppWrapperProps) {
   const [showInterruptDialog, setShowInterruptDialog] = useState(false);
   const [storedConfig, setStoredConfig] = useState<StoredConfig | undefined>(initialStoredConfig);
@@ -2147,6 +2157,7 @@ function RunAppWrapper({
       onConflictSkip={onConflictSkip}
       parallelRefreshedTasks={parallelRefreshedTasks}
       onRefreshTasks={onRefreshTasks}
+      parallelNoWorktree={parallelNoWorktree}
     />
   );
 }
@@ -4210,8 +4221,10 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     }
 
     if (useParallel) {
-      // Parallel execution path
-      const parallelPreflight = checkParallelGitPreflight(config.cwd);
+      // Parallel execution path: default to no-worktree mode
+      // No-worktree mode runs workers sequentially on current branch, no merge needed
+      const useNoWorktree = options.noWorktree !== false;
+      const parallelPreflight = checkParallelGitPreflight(config.cwd, useNoWorktree);
       if (!parallelPreflight.ok) {
         const details = parallelPreflight.errors.map((error) => `- ${error}`).join('\n');
         throw new Error(
@@ -4256,7 +4269,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         filteredTaskIds,
         scopes: executionScopes,
         autoPoll: options.autoLoop,
-        noWorktree: options.noWorktree,
+        noWorktree: useNoWorktree,
       });
 
       // Wire up AI conflict resolution if enabled (default: true)
@@ -4575,7 +4588,12 @@ export async function executeRunCommand(args: string[]): Promise<void> {
                 const hasRunningWorkers = runningWorkers.length > 0;
                 const hasTasksRemaining = inProgress > 0 || open > 0;
                 const hasActiveMerges = state.hasActiveMerges ?? false;
-                const isDeadlocked = !hasRunningWorkers && hasTasksRemaining && !hasActiveMerges;
+                // Only consider it a deadlock if executor status is not 'executing'.
+                // If status='executing' with no running workers, the executor is between
+                // tasks (transitioning from one to the next), not deadlocked.
+                // This happens in no-worktree mode where workers complete and the executor
+                // picks up the next task from pendingTasks.
+                const isDeadlocked = !hasRunningWorkers && hasTasksRemaining && !hasActiveMerges && state.status !== 'executing';
                 const shouldRestart = isDeadlocked;
 
                 const progressLine = logColors.progress(`[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks} | merges=${hasActiveMerges ? 'active' : 'idle'}\n`);
