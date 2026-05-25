@@ -12,7 +12,6 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import type { RalphConfig } from '../config/types.js';
 import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
-import { ExecutionEngine, type WorkerModeOptions } from '../engine/index.js';
 import type { EngineEventListener } from '../engine/types.js';
 import { analyzeTaskGraph, shouldRunParallel } from './task-graph.js';
 import { checkTaskHealth, applyHealthFixes } from './task-health-checker.js';
@@ -604,24 +603,6 @@ export class ParallelExecutor {
   }
 
   /**
-  /**
-   * Create a git checkpoint by tagging the current HEAD.
-   */
-  private createGitCheckpoint(tagName: string): string {
-    try {
-      execFileSync('git', ['tag', tagName, '-m', `Ralph checkpoint for rollback`], {
-        cwd: this.config.cwd,
-        stdio: 'pipe',
-      });
-      const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: this.config.cwd, stdio: 'pipe' }).toString().trim();
-      console.log(`[parallel] Created checkpoint ${tagName} at ${sha}`);
-      return sha;
-    } catch (err) {
-      console.error(`[parallel] Failed to create checkpoint: ${err}`);
-      throw new Error(`Failed to create git checkpoint: ${err}`);
-    }
-  }
-
   /**
    * Stop parallel execution gracefully.
    * Stops all active workers and waits for them to finish.
