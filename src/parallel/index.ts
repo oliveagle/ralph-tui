@@ -1113,6 +1113,8 @@ export class ParallelExecutor {
           }
           groupTasksFailed++;
           this.totalTasksFailed++;
+          // Put task back to pending to retry later!
+          pendingTasks.push(task);
           continue;
         }
 
