@@ -305,12 +305,16 @@ export async function executePatrolCommand(options: PatrolCommandOptions = {}): 
       ? options.parallel
       : storedConfig?.parallel?.maxWorkers ?? 3;
 
+    console.log(`[raloop] Debug: parallel=${options.parallel}, storedConfig.parallel.maxWorkers=${storedConfig?.parallel?.maxWorkers}, resolved maxWorkers=${maxWorkers}`);
+
     // Parallel mode: run tasks via ParallelExecutor with --no-worktree by default
     const executor = new ParallelExecutor(config, tracker, {
       noWorktree: true,
       autoPoll: true,
       maxWorkers,
     });
+
+    console.log(`[raloop] Parallel executor created with maxWorkers=${(executor as any).config.maxWorkers}`);
 
     try {
       await executor.execute();
