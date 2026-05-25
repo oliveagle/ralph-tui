@@ -4596,7 +4596,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
                 const isDeadlocked = !hasRunningWorkers && hasTasksRemaining && !hasActiveMerges && state.status !== 'executing';
                 const shouldRestart = isDeadlocked;
 
-                const progressLine = logColors.progress(`[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks} | merges=${hasActiveMerges ? 'active' : 'idle'}\n`);
+                const progressLine = logColors.progress(`[${time}] [PROGRESS] elapsed=${elapsedStr} workers=running:${runningWorkers.length}/${state.maxWorkers ?? 1} completed:${completedWorkers.length} failed:${failedWorkers.length} | tasks=in_progress:${inProgress} open:${open} | completed=${completedCount}/${totalTasks} | merges=${hasActiveMerges ? 'active' : 'idle'}\n`);
                 writeLog(progressLine);
 
                 if (options.autoLoop && shouldRestart) {
