@@ -419,11 +419,10 @@ export class ParallelExecutor {
         }
       }
 
-      // noWorktree mode: run tasks sequentially in main directory
-      if (this.config.noWorktree) {
-        await this.executeSequential(tasks);
-        return;
-      }
+      // noWorktree mode: tasks run directly in the main directory.
+      // Don't call executeSequential here - instead, let the normal group-based
+      // flow run. executeGroup() will call executeGroupNoWorktree() which
+      // supports parallel batches based on maxWorkers.
 
       // Initialize session branch unless directMerge is enabled.
       // The session branch holds all worker merges, keeping the original branch clean.
