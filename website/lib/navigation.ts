@@ -78,6 +78,7 @@ export const docsNavigation: NavItem[] = [
       {
         title: 'Agents',
         items: [
+          { title: 'Antigravity', href: '/docs/plugins/agents/antigravity', label: 'New' },
           { title: 'Claude', href: '/docs/plugins/agents/claude' },
           { title: 'OpenCode', href: '/docs/plugins/agents/opencode' },
           { title: 'Factory Droid', href: '/docs/plugins/agents/droid' },
@@ -85,6 +86,7 @@ export const docsNavigation: NavItem[] = [
           { title: 'Cursor', href: '/docs/plugins/agents/cursor', label: 'New' },
           { title: 'Gemini', href: '/docs/plugins/agents/gemini', label: 'New' },
           { title: 'GitHub Copilot', href: '/docs/plugins/agents/github-copilot', label: 'New' },
+          { title: 'Grok', href: '/docs/plugins/agents/grok', label: 'New' },
           { title: 'Kimi', href: '/docs/plugins/agents/kimi', label: 'New' },
           { title: 'Kiro', href: '/docs/plugins/agents/kiro', label: 'New' },
           { title: 'Pi', href: '/docs/plugins/agents/pi', label: 'New' },

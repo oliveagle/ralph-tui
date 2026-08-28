@@ -207,7 +207,7 @@ async function runChatMode(
 
   const cwd = parsedArgs.cwd || process.cwd();
   const outputDir = parsedArgs.output || "tasks";
-  const timeout = parsedArgs.timeout ?? 0;
+  const timeout = parsedArgs.timeout;
 
   console.log(`Using agent: ${agent.meta.name}`);
 

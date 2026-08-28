@@ -22,7 +22,7 @@ import {
   createTaskChatEngine,
   slugify,
 } from '../../chat/engine.js';
-import type { ChatMessage, ChatEvent } from '../../chat/types.js';
+import type { ChatMessage, ChatEvent, TimeoutState } from '../../chat/types.js';
 import type { AgentPlugin } from '../../plugins/agents/types.js';
 import { stripAnsiCodes, type FormattedSegment } from '../../plugins/agents/output-formatting.js';
 import { parsePrdMarkdown } from '../../prd/parser.js';
@@ -347,13 +347,85 @@ function PrdPreview({
 }
 
 /**
+ * Timeout Dialog component for retry/continue decision
+ */
+function TimeoutDialog({
+  timeoutState,
+}: {
+  timeoutState: TimeoutState;
+}): ReactNode {
+  const formatMs = (ms: number): string => {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    if (minutes > 0) {
+      return `${minutes}m ${remainingSeconds}s`;
+    }
+    return `${seconds}s`;
+  };
+
+  return (
+    <box
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: colors.bg.overlay,
+      }}
+    >
+      <box
+        style={{
+          width: 60,
+          backgroundColor: colors.bg.secondary,
+          border: true,
+          borderColor: colors.status.warning,
+          flexDirection: 'column',
+          padding: 1,
+        }}
+      >
+        {/* Title */}
+        <text fg={colors.status.warning}>⚠ Request Timed Out</text>
+        <text fg={colors.fg.muted} style={{ marginTop: 1 }}>
+          The request was interrupted after {formatMs(timeoutState.currentTimeout)}.
+        </text>
+
+        {/* Retry info */}
+        {timeoutState.retryCount > 0 && (
+          <box style={{ marginTop: 1 }}>
+            <text fg={colors.fg.primary}>
+              Previous retries: {timeoutState.retryCount}
+            </text>
+          </box>
+        )}
+
+        {/* Options */}
+        <box style={{ marginTop: 2, flexDirection: 'column' }}>
+          <text fg={colors.status.success}>[r] Retry with longer timeout</text>
+          <text fg={colors.fg.primary}>[c] Continue waiting indefinitely</text>
+          <text fg={colors.status.error}>[Esc] Cancel request</text>
+        </box>
+
+        {/* Hint */}
+        <text fg={colors.fg.muted} style={{ marginTop: 1 }}>
+          Press a key to choose
+        </text>
+      </box>
+    </box>
+  );
+}
+
+/**
  * PrdChatApp component - Main application for PRD chat generation
  */
 export function PrdChatApp({
   agent,
   cwd = process.cwd(),
   outputDir = 'tasks',
-  timeout = 0,
+  timeout,
   prdSkill,
   prdSkillSource,
   model,
@@ -389,6 +461,10 @@ export function PrdChatApp({
   // Quit confirmation dialog state
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
 
+  // Timeout dialog state
+  const [showTimeoutDialog, setShowTimeoutDialog] = useState(false);
+  const [timeoutState, setTimeoutState] = useState<TimeoutState | null>(null);
+
   // Track which tracker format was selected for tasks
   const [selectedTrackerFormat, setSelectedTrackerFormat] = useState<
     'json' | 'beads' | null
@@ -397,6 +473,9 @@ export function PrdChatApp({
   // Refs
   const engineRef = useRef<ChatEngine | null>(null);
   const taskEngineRef = useRef<ChatEngine | null>(null);
+  const timeoutEngineRef = useRef<ChatEngine | null>(null);
+  const retryInFlightRef = useRef(false);
+  const retryResponseHandledRef = useRef(false);
   const isMountedRef = useRef(true);
   // Ref for inserting text into the chat input (used for image markers)
   const insertTextRef = useRef<((text: string) => void) | null>(null);
@@ -442,32 +521,84 @@ export function PrdChatApp({
     });
     const taskEngine = createTaskChatEngine(agent, { cwd, timeout, model });
 
-    // Subscribe to events
-    const unsubscribe = engine.on((event: ChatEvent) => {
+    const handleEngineEvent = (sourceEngine: ChatEngine, event: ChatEvent) => {
       switch (event.type) {
         case 'status:changed':
           break;
 
         case 'prd:detected':
-          // PRD was detected - save and switch to review phase
-          void handlePrdDetected(event.prdContent, event.featureName);
+          if (sourceEngine === engine) {
+            // PRD was detected - save and switch to review phase
+            void handlePrdDetected(event.prdContent, event.featureName);
+          }
+          break;
+
+        case 'message:received':
+          if (retryInFlightRef.current) {
+            retryInFlightRef.current = false;
+            retryResponseHandledRef.current = true;
+            if (isMountedRef.current) {
+              setMessages((prev) => [...prev, event.message]);
+              setStreamingChunk('');
+              setStreamingSegments([]);
+              setIsLoading(false);
+              setLoadingStatus('');
+            }
+          }
           break;
 
         case 'error:occurred':
+          retryInFlightRef.current = false;
+          retryResponseHandledRef.current = false;
           if (isMountedRef.current) {
             setError(event.error);
           }
           onError?.(event.error);
           break;
+
+        case 'timeout:occurred':
+          timeoutEngineRef.current = sourceEngine;
+          retryInFlightRef.current = false;
+          retryResponseHandledRef.current = false;
+          if (isMountedRef.current) {
+            // Stop showing loading indicator
+            setIsLoading(false);
+            setTimeoutState(event.timeoutState);
+            setShowTimeoutDialog(true);
+          }
+          break;
+
+        case 'retry:started':
+          timeoutEngineRef.current = sourceEngine;
+          retryInFlightRef.current = true;
+          retryResponseHandledRef.current = false;
+          if (isMountedRef.current) {
+            setShowTimeoutDialog(false);
+            setTimeoutState(event.timeoutState);
+            setIsLoading(true);
+            setLoadingStatus(`Retrying request (attempt ${event.timeoutState.retryCount})...`);
+          }
+          break;
       }
-    });
+    };
+
+    const unsubscribeEngine = engine.on((event) =>
+      handleEngineEvent(engine, event)
+    );
+    const unsubscribeTaskEngine = taskEngine.on((event) =>
+      handleEngineEvent(taskEngine, event)
+    );
 
     engineRef.current = engine;
     taskEngineRef.current = taskEngine;
 
     return () => {
       isMountedRef.current = false;
-      unsubscribe();
+      unsubscribeEngine();
+      unsubscribeTaskEngine();
+      timeoutEngineRef.current = null;
+      retryInFlightRef.current = false;
+      retryResponseHandledRef.current = false;
     };
   }, [agent, cwd, timeout, prdSkill, prdSkillSource, model, onError]);
 
@@ -537,7 +668,8 @@ Send "1", "2", or "3" to choose an option, or continue chatting.`,
    */
   const handleTrackerSelect = useCallback(
     async (option: TrackerOption) => {
-      if (!taskEngineRef.current || !prdPath || !prdContent || isLoading)
+      const taskEngine = taskEngineRef.current;
+      if (!taskEngine || !prdPath || !prdContent || isLoading)
         return;
 
       const parsedPrd = parsePrdMarkdown(prdContent);
@@ -561,6 +693,7 @@ Send "1", "2", or "3" to choose an option, or continue chatting.`,
       setIsLoading(true);
       setStreamingChunk('');
       setStreamingSegments([]);
+      retryResponseHandledRef.current = false;
       setLoadingStatus(`Creating ${option.name} tasks...`);
 
       // Add user selection message
@@ -582,7 +715,7 @@ The PRD file is at: ${prdPath}
 Read the PRD and create the appropriate tasks.${labelsInstruction}`;
 
       try {
-        const result = await taskEngineRef.current.sendMessage(prompt, {
+        const result = await taskEngine.sendMessage(prompt, {
           onSegments: (segments) => {
             if (isMountedRef.current) {
               setStreamingSegments((prev) => [...prev, ...segments]);
@@ -596,8 +729,12 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         });
 
         if (isMountedRef.current) {
+          const retryResponseHandled = retryResponseHandledRef.current;
+          retryResponseHandledRef.current = false;
           if (result.success && result.response) {
-            setMessages((prev) => [...prev, result.response!]);
+            if (!retryResponseHandled) {
+              setMessages((prev) => [...prev, result.response!]);
+            }
             setStreamingChunk('');
             setStreamingSegments([]);
 
@@ -609,7 +746,11 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
               timestamp: new Date(),
             };
             setMessages((prev) => [...prev, doneMsg]);
-          } else if (!result.success) {
+          } else if (
+            !result.success &&
+            taskEngine.getStatus() !== 'timeout' &&
+            !taskEngine.getTimeoutState().retryPending
+          ) {
             setError(result.error || 'Failed to create tasks');
           }
         }
@@ -696,7 +837,8 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       }
 
       // Regular message - requires engine
-      if (!engineRef.current) {
+      const chatEngine = engineRef.current;
+      if (!chatEngine) {
         return;
       }
 
@@ -704,6 +846,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       setIsLoading(true);
       setStreamingChunk('');
       setStreamingSegments([]);
+      retryResponseHandledRef.current = false;
       setLoadingStatus('Sending to agent...');
       setError(undefined);
 
@@ -729,7 +872,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       const promptToSend = userMessage + imageSuffix;
 
       try {
-        const result = await engineRef.current.sendMessage(promptToSend, {
+        const result = await chatEngine.sendMessage(promptToSend, {
           onSegments: (segments) => {
             if (isMountedRef.current) {
               setStreamingSegments((prev) => [...prev, ...segments]);
@@ -743,11 +886,19 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         });
 
         if (isMountedRef.current) {
+          const retryResponseHandled = retryResponseHandledRef.current;
+          retryResponseHandledRef.current = false;
           if (result.success && result.response) {
-            setMessages((prev) => [...prev, result.response!]);
+            if (!retryResponseHandled) {
+              setMessages((prev) => [...prev, result.response!]);
+            }
             setStreamingChunk('');
             setStreamingSegments([]);
-          } else if (!result.success) {
+          } else if (
+            !result.success &&
+            chatEngine.getStatus() !== 'timeout' &&
+            !chatEngine.getTimeoutState().retryPending
+          ) {
             setError(result.error || 'Failed to get response');
           }
         }
@@ -780,6 +931,51 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       onError,
     ],
   );
+
+  /**
+   * Handle timeout dialog retry action
+   */
+  const handleTimeoutRetry = useCallback(() => {
+    const timeoutEngine = timeoutEngineRef.current ?? engineRef.current;
+    if (!timeoutEngine) return;
+
+    setShowTimeoutDialog(false);
+    // Reset timeout-related state
+    setTimeoutState(null);
+    // Retry using the engine's built-in retry mechanism
+    timeoutEngine.retry();
+  }, []);
+
+  /**
+   * Handle timeout dialog cancel action
+   */
+  const handleTimeoutCancel = useCallback(() => {
+    const timeoutEngine = timeoutEngineRef.current ?? engineRef.current;
+    if (!timeoutEngine) return;
+
+    setShowTimeoutDialog(false);
+    setTimeoutState(null);
+    setIsLoading(false);
+    setLoadingStatus('');
+    // Tell the engine to cancel the timeout state
+    timeoutEngine.cancelTimeout();
+    timeoutEngineRef.current = null;
+  }, []);
+
+  /**
+   * Handle continue waiting indefinitely - re-send with no timeout
+   */
+  const handleTimeoutContinue = useCallback(() => {
+    const timeoutEngine = timeoutEngineRef.current ?? engineRef.current;
+    if (!timeoutEngine) return;
+
+    setShowTimeoutDialog(false);
+    setTimeoutState(null);
+    setIsLoading(true);
+    setLoadingStatus('Continuing to wait for agent response (no timeout)...');
+    // Tell the engine to continue indefinitely
+    timeoutEngine.continueIndefinitely();
+  }, []);
 
   /**
    * Clipboard fallback for terminals that don't emit OpenTUI paste events.
@@ -889,6 +1085,18 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         return;
       }
 
+      // Handle timeout dialog
+      if (showTimeoutDialog && timeoutState) {
+        if (key.name === 'r' || key.sequence === 'r' || key.sequence === 'R') {
+          handleTimeoutRetry();
+        } else if (key.name === 'c' || key.sequence === 'c' || key.sequence === 'C') {
+          handleTimeoutContinue();
+        } else if (key.name === 'escape') {
+          handleTimeoutCancel();
+        }
+        return;
+      }
+
       // Don't process keys while loading
       if (isLoading) {
         return;
@@ -942,6 +1150,11 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       featureName,
       selectedTrackerFormat,
       renderer,
+      showTimeoutDialog,
+      timeoutState,
+      handleTimeoutRetry,
+      handleTimeoutCancel,
+      handleTimeoutContinue,
     ],
   );
 
@@ -1123,7 +1336,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         streamingSegments={streamingSegments}
         inputPlaceholder="Describe your feature..."
         error={error}
-        inputEnabled={!isLoading && !showQuitConfirm}
+        inputEnabled={!isLoading && !showQuitConfirm && !showTimeoutDialog}
         hint={hint}
         agentName={agent.meta.name}
         onSubmit={sendMessage}
@@ -1138,6 +1351,13 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         message="Your progress will be lost."
         hint="[y] Yes, cancel  [n/Esc] No, continue"
       />
+
+      {/* Timeout dialog */}
+      {showTimeoutDialog && timeoutState && (
+        <TimeoutDialog
+          timeoutState={timeoutState}
+        />
+      )}
 
       {/* Copy feedback toast - positioned at bottom right */}
       {copyFeedback && (

@@ -76,6 +76,7 @@ import { projectConfigExists, runSetupWizard, checkAndMigrate } from '../setup/i
 import { createInterruptHandler } from '../interruption/index.js';
 import type { InterruptHandler } from '../interruption/types.js';
 import { createStructuredLogger, clearProgress } from '../logs/index.js';
+import { createHeadlessEventHandler } from './headless-events.js';
 import { sendCompletionNotification, sendMaxIterationsNotification, sendErrorNotification, resolveNotificationsEnabled } from '../notifications.js';
 import type { NotificationSoundMode } from '../config/types.js';
 import { detectSandboxMode } from '../sandbox/index.js';
@@ -3176,7 +3177,6 @@ async function runHeadless(
   const notificationOptions = headlessOptions?.notificationOptions;
   const listenMode = headlessOptions?.listenMode ?? false;
   const remoteServer = headlessOptions?.remoteServer;
-  let currentState = persistedState;
   let lastSigintTime = 0;
   const DOUBLE_PRESS_WINDOW_MS = 1000;
   // Track when engine starts for duration calculation
@@ -3187,118 +3187,30 @@ async function runHeadless(
   // Create structured logger for headless output
   const logger = createStructuredLogger();
 
-  // Subscribe to events for structured log output and state persistence
+  // Shared handler: structured log output and session state persistence
+  const headlessEvents = createHeadlessEventHandler({
+    logger,
+    maxIterations: config.maxIterations,
+    initialState: persistedState,
+  });
+  engine.on(headlessEvents.handleEvent);
+
+  // Subscribe to events for run-specific concerns (notifications, remote server)
   engine.on((event) => {
     switch (event.type) {
       case 'engine:started':
-        logger.engineStarted(event.totalTasks);
         // Track when engine started for duration calculation
         engineStartTime = new Date();
         break;
 
-      case 'engine:warning':
-        logger.warn('engine', event.message);
-        break;
-
-      case 'iteration:started':
-        // Progress update in required format
-        logger.progress(
-          event.iteration,
-          config.maxIterations,
-          event.task.id,
-          event.task.title
-        );
-        break;
-
-      case 'iteration:completed':
-        // Log iteration completion
-        logger.iterationComplete(
-          event.result.iteration,
-          event.result.task.id,
-          event.result.taskCompleted,
-          event.result.durationMs
-        );
-
-        // Log task completion if applicable
-        if (event.result.taskCompleted) {
-          logger.taskCompleted(event.result.task.id, event.result.iteration);
-          // Remove from active tasks
-          currentState = removeActiveTask(currentState, event.result.task.id);
-        }
-
-        // Save state after each iteration
-        currentState = updateSessionAfterIteration(currentState, event.result);
-        savePersistedSession(currentState).catch(() => {
-          // Silently continue on save errors
-        });
-        break;
-
-      case 'task:activated':
-        // Track task as active when set to in_progress
-        currentState = addActiveTask(currentState, event.task.id);
-        savePersistedSession(currentState).catch(() => {
-          // Silently continue on save errors
-        });
-        break;
-
       case 'iteration:failed':
-        logger.iterationFailed(
-          event.iteration,
-          event.task.id,
-          event.error,
-          event.action
-        );
         // Track error for notification if this will abort
         if (event.action === 'abort') {
           lastError = event.error;
         }
         break;
 
-      case 'iteration:retrying':
-        logger.iterationRetrying(
-          event.iteration,
-          event.task.id,
-          event.retryAttempt,
-          event.maxRetries,
-          event.delayMs
-        );
-        break;
-
-      case 'iteration:skipped':
-        logger.iterationSkipped(event.iteration, event.task.id, event.reason);
-        break;
-
-      case 'agent:output':
-        // Stream agent output with [AGENT] prefix
-        if (event.stream === 'stdout') {
-          logger.agentOutput(event.data);
-        } else {
-          logger.agentError(event.data);
-        }
-        break;
-
-      case 'task:selected':
-        logger.taskSelected(event.task.id, event.task.title, event.iteration);
-        break;
-
-      case 'engine:paused':
-        logger.enginePaused(event.currentIteration);
-        currentState = pauseSession(currentState);
-        savePersistedSession(currentState).catch(() => {
-          // Silently continue on save errors
-        });
-        break;
-
-      case 'engine:resumed':
-        logger.engineResumed(event.fromIteration);
-        currentState = { ...currentState, status: 'running', isPaused: false, pausedAt: undefined };
-        savePersistedSession(currentState).catch(() => {
-          // Silently continue on save errors
-        });
-        break;
-
       case 'engine:stopped':
-        logger.engineStopped(event.reason, event.totalIterations, event.tasksCompleted);
         // Send max iterations notification if enabled
         if (event.reason === 'max_iterations' && notificationOptions?.notificationsEnabled && engineStartTime) {
           const durationMs = Date.now() - engineStartTime.getTime();
@@ -3325,7 +3237,6 @@ async function runHeadless(
         break;
 
       case 'all:complete':
-        logger.allComplete(event.totalCompleted, event.totalIterations);
         // Send completion notification if enabled
         if (notificationOptions?.notificationsEnabled && engineStartTime) {
           const durationMs = Date.now() - engineStartTime.getTime();
@@ -3336,15 +3247,6 @@ async function runHeadless(
           });
         }
         break;
-
-      case 'task:completed':
-        // Already logged in iteration:completed handler
-        // Remove from active tasks (redundant with iteration:completed but safe)
-        currentState = removeActiveTask(currentState, event.task.id);
-        savePersistedSession(currentState).catch(() => {
-          // Silently continue on save errors
-        });
-        break;
     }
   });
 
@@ -3354,18 +3256,18 @@ async function runHeadless(
     logger.info('system', '(Press Ctrl+C again within 1s to force quit)');
 
     // Reset any active (in_progress) tasks back to open
-    const activeTasks = getActiveTasks(currentState);
+    const activeTasks = getActiveTasks(headlessEvents.getState());
     if (activeTasks.length > 0) {
       logger.info('system', `Resetting ${activeTasks.length} in_progress task(s) to open...`);
       const resetCount = await engine.resetTasksToOpen(activeTasks);
       if (resetCount > 0) {
-        currentState = clearActiveTasks(currentState);
+        headlessEvents.setState(clearActiveTasks(headlessEvents.getState()));
       }
     }
 
     // Save interrupted state
-    currentState = { ...currentState, status: 'interrupted' };
-    await savePersistedSession(currentState);
+    headlessEvents.setState({ ...headlessEvents.getState(), status: 'interrupted' });
+    await savePersistedSession(headlessEvents.getState());
 
     // Stop remote server if running
     if (remoteServer) {
@@ -3397,17 +3299,17 @@ async function runHeadless(
     logger.info('system', 'Received SIGTERM, stopping gracefully...');
 
     // Reset any active (in_progress) tasks back to open
-    const activeTasks = getActiveTasks(currentState);
+    const activeTasks = getActiveTasks(headlessEvents.getState());
     if (activeTasks.length > 0) {
       logger.info('system', `Resetting ${activeTasks.length} in_progress task(s) to open...`);
       const resetCount = await engine.resetTasksToOpen(activeTasks);
       if (resetCount > 0) {
-        currentState = clearActiveTasks(currentState);
+        headlessEvents.setState(clearActiveTasks(headlessEvents.getState()));
       }
     }
 
-    currentState = { ...currentState, status: 'interrupted' };
-    await savePersistedSession(currentState);
+    headlessEvents.setState({ ...headlessEvents.getState(), status: 'interrupted' });
+    await savePersistedSession(headlessEvents.getState());
 
     // Stop remote server if running
     if (remoteServer) {
@@ -3423,7 +3325,7 @@ async function runHeadless(
 
   // Log session start
   logger.sessionCreated(
-    currentState.sessionId,
+    headlessEvents.getState().sessionId,
     config.agent.plugin,
     config.tracker.plugin
   );
@@ -3444,7 +3346,7 @@ async function runHeadless(
 
   await engine.dispose();
 
-  return currentState;
+  return headlessEvents.getState();
 }
 
 /**

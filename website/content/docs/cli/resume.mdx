@@ -113,6 +113,21 @@ ralph-tui resume --force
 Only use `--force` when you're certain no other Ralph instance is running. Using it while another instance is active can cause conflicts.
 </Callout>
 
+## Headless Output
+
+With `--headless`, `resume` emits the same structured log stream as [`run --headless`](/docs/cli/run):
+
+```
+[10:32:18] [INFO] [session] Session a3c96cf6 resumed
+[10:32:18] [INFO] [engine] Ralph started. Total tasks: 17
+[10:32:19] [INFO] [progress] Iteration 1/∞: Working on hre-42 - Isolate fixture cases
+[10:32:24] [INFO] [agent] Reading src/fixture.ts
+[10:32:31] [INFO] [agent] Editing src/fixture.ts
+[10:42:42] [INFO] [progress] Iteration 1 finished. Task hre-42: in progress. Duration: 64s
+```
+
+Every line follows the `[timestamp] [level] [component] message` format, so the output is machine-parseable for CI. Agent stdout is streamed under the `agent` component as the iteration runs, which means a long-running iteration keeps reporting progress instead of going silent between iteration boundaries.
+
 ## What Gets Restored
 
 When you resume a session, Ralph restores:

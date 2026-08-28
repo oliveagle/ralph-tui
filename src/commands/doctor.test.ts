@@ -37,6 +37,8 @@ interface MockPreflightResult {
 // Store mock implementations that can be changed per test
 let mockDetectResult: MockDetectResult = { available: true, version: '1.0.0', executablePath: '/usr/bin/mock' };
 let mockPreflightResult: MockPreflightResult = { success: true, durationMs: 100 };
+let mockDiscoveredPlugin = false;
+let mockUserPluginResults: Array<{ success: boolean; pluginId?: string; error?: string }> = [];
 
 // Capture the last config passed to getInstance for verification
 let lastGetInstanceConfig: unknown = null;
@@ -45,16 +47,19 @@ let lastGetInstanceConfig: unknown = null;
 let lastPreflightOptions: { timeout?: number } | null = null;
 
 // Mock agent instance
-const createMockAgentInstance = () => ({
-  meta: { id: 'claude', name: 'Claude Code' },
-  detect: () => Promise.resolve(mockDetectResult),
-  preflight: (opts?: { timeout?: number }) => {
-    lastPreflightOptions = opts ?? null;
-    return Promise.resolve(mockPreflightResult);
-  },
-  initialize: () => Promise.resolve(),
-  dispose: () => Promise.resolve(),
-});
+const createMockAgentInstance = (config?: unknown) => {
+  const plugin = (config as { plugin?: string } | undefined)?.plugin ?? 'claude';
+  return {
+    meta: { id: plugin, name: plugin === 'echo' ? 'Echo Agent' : 'Claude Code' },
+    detect: () => Promise.resolve(mockDetectResult),
+    preflight: (opts?: { timeout?: number }) => {
+      lastPreflightOptions = opts ?? null;
+      return Promise.resolve(mockPreflightResult);
+    },
+    initialize: () => Promise.resolve(),
+    dispose: () => Promise.resolve(),
+  };
+};
 
 // Mock the agent registry
 mock.module('../plugins/agents/registry.js', () => ({
@@ -62,10 +67,15 @@ mock.module('../plugins/agents/registry.js', () => ({
   getAgentRegistry: () => ({
     getInstance: (config: unknown) => {
       lastGetInstanceConfig = config;
-      return Promise.resolve(createMockAgentInstance());
+      return Promise.resolve(createMockAgentInstance(config));
     },
-    hasPlugin: (name: string) => name === 'claude' || name === 'opencode',
+    hasPlugin: (name: string) =>
+      name === 'claude' || name === 'opencode' || (name === 'echo' && mockDiscoveredPlugin),
     registerBuiltin: () => {},
+    initialize: () => {
+      mockDiscoveredPlugin = true;
+      return Promise.resolve(mockUserPluginResults);
+    },
     getRegisteredPlugins: () => [
       { id: 'claude', name: 'Claude Code', description: 'Claude AI', version: '1.0.0' },
       { id: 'opencode', name: 'OpenCode', description: 'OpenCode AI', version: '1.0.0' },
@@ -113,6 +123,8 @@ describe('doctor command', () => {
     // Reset mock values
     mockDetectResult = { available: true, version: '1.0.0', executablePath: '/usr/bin/mock' };
     mockPreflightResult = { success: true, durationMs: 100 };
+    mockDiscoveredPlugin = false;
+    mockUserPluginResults = [];
 
     // Spy on console
     consoleLogSpy = spyOn(console, 'log').mockImplementation((...args) => {
@@ -214,6 +226,54 @@ describe('doctor command', () => {
       expect(result.detection.available).toBe(true);
       expect(result.preflight?.success).toBe(true);
       expect(result.message).toContain('healthy');
+    });
+
+    test('discovers user-only agents before resolving the requested plugin', async () => {
+      try {
+        await executeDoctorCommand(['--agent', 'echo', '--cwd', tempDir]);
+      } catch {
+        // Expected - process.exit is called
+      }
+
+      const output = capturedOutput.join('\n');
+      expect(output).toContain('HEALTHY');
+      expect(output).not.toContain('Unknown agent plugin');
+    });
+
+    test('warns about failed user plugin loads in human-readable output', async () => {
+      mockUserPluginResults = [{
+        success: false,
+        error: 'Failed to load plugin broken-agent.ts: import exploded',
+      }];
+
+      try {
+        await executeDoctorCommand(['--cwd', tempDir]);
+      } catch {
+        // Expected - process.exit is called
+      }
+
+      const output = capturedOutput.join('\n');
+      expect(output).toContain('⚠ Failed to load plugin broken-agent.ts: import exploded');
+      expect(output).toContain('HEALTHY');
+    });
+
+    test('does not emit plugin debug results when debug flag is 0', async () => {
+      const originalDebugFlag = process.env.RALPH_TUI_DEBUG_PLUGINS;
+      process.env.RALPH_TUI_DEBUG_PLUGINS = '0';
+
+      try {
+        await executeDoctorCommand(['--cwd', tempDir]);
+      } catch {
+        // Expected - process.exit is called
+      } finally {
+        if (originalDebugFlag === undefined) {
+          delete process.env.RALPH_TUI_DEBUG_PLUGINS;
+        } else {
+          process.env.RALPH_TUI_DEBUG_PLUGINS = originalDebugFlag;
+        }
+      }
+
+      expect(capturedErrors.join('\n')).not.toContain('DEBUG user plugin load results:');
     });
 
     test('reports unhealthy when detection fails', async () => {

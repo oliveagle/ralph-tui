@@ -37,8 +37,10 @@ import {
   type SessionRegistryEntry,
 } from '../session/index.js';
 import { buildConfig, validateConfig } from '../config/index.js';
-import type { RuntimeOptions } from '../config/types.js';
+import type { RalphConfig, RuntimeOptions } from '../config/types.js';
 import { ExecutionEngine } from '../engine/index.js';
+import { createStructuredLogger } from '../logs/index.js';
+import { createHeadlessEventHandler } from './headless-events.js';
 import { registerBuiltinAgents } from '../plugins/agents/builtin/index.js';
 import { registerBuiltinTrackers } from '../plugins/trackers/builtin/index.js';
 import { getAgentRegistry } from '../plugins/agents/registry.js';
@@ -478,70 +480,26 @@ async function runWithTui(
 async function runHeadless(
   engine: ExecutionEngine,
   cwd: string,
-  initialState: PersistedSessionState
+  initialState: PersistedSessionState,
+  config: RalphConfig
 ): Promise<PersistedSessionState> {
-  let currentState = initialState;
+  // Create structured logger for headless output
+  const logger = createStructuredLogger();
 
-  engine.on((event) => {
-    switch (event.type) {
-      case 'engine:started':
-        console.log(`\nResumed Ralph. Total tasks: ${event.totalTasks}`);
-        break;
-
-      case 'iteration:started':
-        console.log(`\n--- Iteration ${event.iteration}: ${event.task.title} ---`);
-        break;
-
-      case 'iteration:completed':
-        console.log(
-          `Iteration ${event.result.iteration} completed. ` +
-            `Task ${event.result.taskCompleted ? 'DONE' : 'in progress'}. ` +
-            `Duration: ${Math.round(event.result.durationMs / 1000)}s`
-        );
-        // Save state after each iteration
-        currentState = updateSessionAfterIteration(currentState, event.result);
-        savePersistedSession(currentState).catch(() => {
-          // Log but don't fail on save errors
-        });
-        break;
-
-      case 'iteration:failed':
-        console.error(`Iteration ${event.iteration} FAILED: ${event.error}`);
-        break;
-
-      case 'engine:paused':
-        console.log('\nPaused. Use "ralph-tui resume" to continue.');
-        currentState = pauseSession(currentState);
-        savePersistedSession(currentState).catch(() => {
-          // Log but don't fail on save errors
-        });
-        break;
-
-      case 'engine:resumed':
-        console.log('\nResumed...');
-        currentState = { ...currentState, status: 'running', isPaused: false, pausedAt: undefined };
-        savePersistedSession(currentState).catch(() => {
-          // Log but don't fail on save errors
-        });
-        break;
-
-      case 'engine:stopped':
-        console.log(`\nRalph stopped. Reason: ${event.reason}`);
-        console.log(`Total iterations: ${event.totalIterations}`);
-        console.log(`Tasks completed: ${event.tasksCompleted}`);
-        break;
-
-      case 'all:complete':
-        console.log('\nAll tasks complete!');
-        break;
-    }
+  // Shared handler: same structured output and state persistence as `run --headless`,
+  // including streamed agent output during long iterations.
+  const headlessEvents = createHeadlessEventHandler({
+    logger,
+    maxIterations: config.maxIterations,
+    initialState,
   });
+  engine.on(headlessEvents.handleEvent);
 
   const handleSignal = async (): Promise<void> => {
-    console.log('\nInterrupted, stopping...');
+    logger.info('system', 'Interrupted, stopping...');
     // Save interrupted state
-    currentState = { ...currentState, status: 'interrupted' };
-    await savePersistedSession(currentState);
+    headlessEvents.setState({ ...headlessEvents.getState(), status: 'interrupted' });
+    await savePersistedSession(headlessEvents.getState());
     await engine.dispose();
     await releaseLock(cwd);
     process.exit(0);
@@ -550,10 +508,13 @@ async function runHeadless(
   process.on('SIGINT', handleSignal);
   process.on('SIGTERM', handleSignal);
 
+  // Log session resume
+  logger.sessionResumed(headlessEvents.getState().sessionId);
+
   await engine.start();
   await engine.dispose();
   await releaseLock(cwd);
-  return currentState;
+  return headlessEvents.getState();
 }
 
 /**
@@ -779,7 +740,7 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
         executionScopes
       );
     } else {
-      finalState = await runHeadless(engine, cwd, resumedState);
+      finalState = await runHeadless(engine, cwd, resumedState, config);
     }
   } catch (error) {
     console.error(

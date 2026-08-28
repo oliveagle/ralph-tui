@@ -130,7 +130,7 @@ Options:
   --agent, -a <name>     Agent plugin to use (default: from config)
   --model <name>         Override model (e.g., opus, sonnet, anthropic/claude-3-5-sonnet)
   --variant <level>      Model variant/reasoning effort (e.g., minimal, high, max)
-  --timeout, -t <ms>     Timeout for AI agent calls in ms (default: 0 = no timeout)
+  --timeout, -t <ms>     Timeout for AI agent calls in ms (default: 600000 = 10 minutes; 0 = no timeout)
   --prd-skill <name>     PRD skill folder inside skills_dir
   --force, -f            Overwrite existing files without prompting
   --help, -h             Show this help message
